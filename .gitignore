@@ -7,3 +7,7 @@ venv/
 secrets/
 output/
 crops/
+dist/
+build/
+*.spec
+*.app

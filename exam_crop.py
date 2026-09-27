@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
-"""
+r"""
 exam_crop.py — 수능/모의고사 수학 시험지(텍스트 PDF)에서 문제·해설을 문항별 PNG(600dpi)로 잘라내는 코어 라이브러리 + CLI
 
 CLI
   python exam_crop.py 시험지_문제.pdf 시험지_해설.pdf ...   [--out crops] [--exam 이름] [--margin 3] [--dpi 600] [--split] [--debug]
                                                           [--pdf | --pdf-only]
 
-  파일명에 `_문제` 가 있으면 문제지, `_해설` 이 있으면 해설지, 둘 다 없으면 합본(문제 뒤에 해설)으로 보고 자동 감지한다.
-  --exam 을 주지 않으면 파일명에서 확장자와 _문제/_해설 을 뗀 이름을 시험지명으로 쓴다.
+  파일명에 `_문제`(또는 `_문`) 가 있으면 문제지, `_해설`(또는 `_해`) 이 있으면 해설지,
+  둘 다 없으면 합본(문제 뒤에 해설)으로 보고 자동 감지한다.   [패치 10: _문/_해 축약형 추가]
+  --exam 을 주지 않으면 파일명에서 확장자와 _문제/_해설(_문/_해) 을 뗀 이름을 시험지명으로 쓴다.
 
 출력
   <out>/<시험지명>_문제_1공통07.png,  <out>/<시험지명>_해설_4미적28.png
@@ -51,6 +52,51 @@ CLI
        외곽선 전용 규칙을 텍스트 PDF 로 일반화. (안 버리면 직전 30번의 _c2 조각이 된다)
     3) 해설 페이지 어디에도 과목 텍스트가 없으면 "확통→미적→기하 순서 가정" 안내를 notes 에 남긴다.
 
+[패치 10 · 2026-09-19 — 파일명 `_문` / `_해` 축약 표기 인식 + 문제지 0개 진단 로그]
+  1) 파일명 종류 판별(KIND_RE)에 `_문`, `_해` 축약형을 추가했다.
+       K25(260915)_문.pdf → 문제,  K25(260915)_해.pdf → 해설,  시험지명 = K25(260915)
+     축약형은 구분자(_, -, 공백) 뒤에 오고 바로 뒤에 한글이 이어지지 않을 때만 인정한다
+     (`_문항`, `_해커스` 같은 이름을 오인하지 않기 위해). 기존 `_문제`/`_해설`/`_문제지`/
+     `_해설지`/`_정답및해설` 은 그대로다.
+     ※ 패치 9까지는 `_문`/`_해` 파일이 둘 다 '합본'으로 분류되고 시험지명도 `…_문`, `…_해` 로
+       서로 달라 한 세트로 묶이지 않았다. 합본으로 분석된 문제지에서 해설 크기 번호가 하나라도
+       잡히면 그 쪽부터 해설 구간으로 넘어가 문제 문항이 0개가 될 수 있다.
+  2) 문제/합본 파일에서 문제 문항을 하나도 못 찾았을 때, 원인을 가늠할 수 있는 진단문을
+     notes 에 남긴다 (텍스트 있는 쪽 수, 크기 조건을 만족한 `N.` 번호 수, 해설 크기(≥17pt)
+     번호 수, 해설 구간 시작 쪽). GUI 로그에 그대로 표시된다.
+  3) 문제 파일(kind='문제')은 해설 구간을 나누지 않고, 해설 크기(≥17pt)로 잡힌 번호도
+     문제 번호로 쓴다 — 문제지 번호가 크거나 마침표가 없는 양식에서 번호가 전부 해설로
+     분류돼 문제 페이지가 통째로 해설 구간으로 넘어가 0개가 되는 일을 막는다.
+     (해설 파일과 합본은 종전과 같다.)
+
+[패치 11 · 2026-09-20 — 이미지 글자 PDF 감지 모드 (강대 K 문제지)]
+  강남대성 K 모의고사 문제지는 본문 글자와 문항 번호가 전부 낱말 단위 이미지로 들어 있다
+  (텍스트는 HWP 수식 폰트 글리프뿐, 번호 이미지는 소프트마스크라 내용 판독 불가).
+  텍스트 번호도, 벡터 외곽선도 없어 패치 8·9 로는 문항 0개였다.
+    1) 텍스트 번호를 못 찾았고 쪽당 이미지가 IMGTXT_MIN_IMAGES 개 이상이면 이 모드로 전환.
+    2) 단 왼쪽 가장자리에 붙은 작은 이미지(폭 9~26pt, 높이 9~20pt, 줄의 첫 요소)를 번호로 본다.
+    3) 번호는 읽기 순서로 1~22, 이후 23~30 반복으로 배정 (수능 수학 구성). 한 자리 번호 이미지가
+       두 자리보다 좁은지, 개수가 22+8k 인지로 검증하고 어긋나면 notes 에 경고.
+    4) 과목명을 읽을 수 없어 23번마다 확통→미적→기하 순으로 배정 (외곽선 모드와 같음).
+  같은 세트의 해설지는 번호가 텍스트라 패치 9 로 정상 처리된다.
+
+[패치 12 · 2026-09-27 — 3단 해설 양식 (SOLN 모의고사 등)]
+  해설이 세로 구분선 2개로 나뉜 3단 편집이고, 해설 번호가 본문과 같은 9pt 크기의
+  `N. [정답] ④` 꼴이라 기존 규칙(2단, 해설 번호 ≥17pt)으로는 해설이 0개였다.
+    1) 레이아웃: 쪽 높이 40% 이상의 세로선이 x 위치가 다른 것으로 2개 이상이면 N단으로 본다.
+       (Layout.dividers — 2단 PDF 는 종전과 똑같이 동작)
+       같은 문서의 3단 쪽과 구분선 x 가 같은데 세로선이 1개뿐인 쪽(마지막 쪽 등)도 3단으로 맞춘다.
+    2) 해설 번호: 3단 쪽에서 단 왼쪽 끝에 붙은 `N.` 뒤에 같은 줄로 `정답` 이 오면 해설 번호로 본다
+       (글자 크기 무관). 한 줄로 합쳐진 `N. [정답] ④` 꼴도 인정.
+    3) 과목 라벨(`[공통]`, `확률과 통계`, `미적분`, `기하` — 12pt 이상 단독 줄)과 `[해설]` 라벨이
+       단 중간에 오면 그 윗선에서 해설 조각을 끊는다. 라벨 아래 빠른 정답표는 다음 번호 전까지라
+       어느 문항에도 붙지 않는다. (종전 규칙은 라벨이 있는 선두 조각을 통째로 버려서, 라벨 위에
+       있던 직전 문항(예: 22번)의 이어지는 해설까지 사라졌다.)
+    4) 과목은 읽기 순서상 가장 최근에 지나온 과목 라벨로 정한다. 쪽 전체 텍스트에서 과목명을
+       찾는 기존 방식은 한 쪽에 두 과목(확통 30번 + 미적 23번)이 섞이면 틀리기 때문.
+    5) 해설 쪽 번호가 텍스트로 잡혀도, 문제 쪽이 이미지 글자(패치 11)이면 문제 쪽에만
+       이미지 글자 감지를 따로 돌린다 (종전에는 번호가 하나라도 잡히면 이미지 감지를 건너뜀).
+
 GUI 앱은 exam_crop_app.py 참고.
 """
 from __future__ import annotations
@@ -83,12 +129,27 @@ SECTION_LABEL = re.compile(r"^\s*(공통과목|확률\s*과\s*통계|미적분|�
 SOL_HEAD_RE = re.compile(r"^(\d{1,2})\.?$")
 PROB_HEAD_RE = re.compile(r"^(\d{1,2})\.(\s|$)")
 LABEL_CHUNK_MAX_H = 60       # [패치 9] 23번 직전 선두 조각이 이보다 얇고 텍스트가 없으면 과목 라벨로 간주
+# [패치 12] 3단 해설 양식
+MULTICOL_MIN_GAP = 60.0      # 서로 다른 단 구분선으로 볼 세로선 x 간격 하한(pt)
+MC_HEAD_RE = re.compile(r"^(\d{1,2})\.$")                      # 줄 전체가 'N.'
+MC_HEAD_INLINE_RE = re.compile(r"^(\d{1,2})\.\s*\[?\s*정답")    # 한 줄로 합쳐진 'N. [정답] …'
+MC_LABEL_RE = re.compile(r"^\[?\s*(공통(?:\s*과목)?|확률\s*과\s*통계|미적분|기하|해설)\s*\]?$")
+MC_LABEL_MIN_SIZE = 12.0     # 과목·[해설] 라벨 글자 크기 하한 (본문 9pt 내외, 라벨 14.6pt)
+MC_LABEL_SUBJ = {"공통": "공통", "공통과목": "공통", "확률과통계": "확통", "미적분": "미적", "기하": "기하"}
 PROB_HEADING_SIZE = 12.3     # 문제 번호 글자 크기 하한 (본문 11pt 내외, 번호 13pt 내외)
 SOL_HEADING_SIZE = 17.0      # 해설 번호 글자 크기 하한 (20pt 내외)
 MM = 72 / 25.4               # 1mm → pt
 STITCH_GAP_MM = 3.0          # (구버전 stitch 용, 현재 미사용)
 
-KIND_RE = re.compile(r"[_\-\s]?(문제지|문제|해설지|해설|정답및해설|정답\s*및\s*해설)", re.I)
+# [패치 10] 파일명 종류 표기.
+#   group(1): 기존 전체 표기 — 구분자 없이 붙어 있어도 인정 (예: '모의고사문제')
+#   group(2): 축약 표기 '문' / '해' — 반드시 구분자(_ - 공백) 뒤에 오고, 바로 뒤에 한글이 없어야 함
+#             (예: 'K25_문.pdf', 'K25_해(260915).pdf' ○ / 'K25_문항별.pdf', '2606_해커스.pdf' ×)
+KIND_RE = re.compile(
+    r"[_\-\s]?(문제지|문제|해설지|해설|정답및해설|정답\s*및\s*해설)"
+    r"|[_\-\s](문|해)(?![가-힣])",
+    re.I,
+)
 
 # ---- 패치 8: 외곽선 PDF 감지 파라미터 -------------------------------------
 OUTLINE_HEAD_MIN_H = 9.2      # 문항 번호 숫자 글리프 높이 하한(pt) — 본문 11pt 숫자(≈8.4)와 구분
@@ -127,12 +188,24 @@ class Layout:
     divider: float
     width: float
     height: float
+    dividers: List[float] = field(default_factory=list)   # [패치 12] 단 구분선 x 목록 (N단)
+
+    def __post_init__(self):
+        if not self.dividers:
+            self.dividers = [self.divider]
+
+    @property
+    def ncols(self) -> int:
+        return len(self.dividers) + 1
 
     def col_bounds(self, col: int) -> Tuple[float, float]:
-        return (self.left, self.divider) if col == 0 else (self.divider, self.right)
+        edges = [self.left] + self.dividers + [self.right]
+        col = max(0, min(col, len(edges) - 2))
+        return edges[col], edges[col + 1]
 
     def col_of(self, rect: pymupdf.Rect) -> int:
-        return 0 if (rect.x0 + rect.x1) / 2 < self.divider else 1
+        cx = (rect.x0 + rect.x1) / 2
+        return sum(1 for d in self.dividers if cx >= d)
 
 
 @dataclass
@@ -199,6 +272,18 @@ def analyze_layout(page: pymupdf.Page, drawings) -> Layout:
         divider, bottom = W / 2, 0.93 * H
     left = min([r.x0 for r in h_rules], default=0.06 * W)
     right = max([r.x1 for r in h_rules], default=0.94 * W)
+    # [패치 12] x 위치가 다른 긴 세로선이 2개 이상이면 N단 (3단 해설 등)
+    xs: List[float] = []
+    for r in sorted(v_rules, key=lambda r: r.x0):
+        if not (0.1 * W < r.x0 < 0.9 * W):
+            continue                                      # 쪽 테두리 세로선은 단 구분선이 아님
+        if not xs or r.x0 - xs[-1] > MULTICOL_MIN_GAP:
+            xs.append(r.x0)
+    if len(xs) >= 2:
+        if not top_rules:                                 # 머릿말 선이 없으면 세로선 윗끝을 본문 시작으로
+            top = min(r.y0 for r in v_rules) - 4
+        bottom = max(r.y1 for r in v_rules)
+        return Layout(top, bottom, left, right, xs[0], W, H, xs)
     return Layout(top, bottom, left, right, divider, W, H)
 
 
@@ -271,6 +356,69 @@ def page_subject(text: str) -> Optional[str]:
         if pat.search(text):
             return subj
     return None
+
+
+# ---------------------------------------------- 패치 12: 3단 해설 -----
+def find_multicol_sol_heads(items: List[Item], layout: Layout, page_no: int) -> List[Heading]:
+    """3단 이상 쪽에서 `N. [정답] ④` 꼴 해설 번호를 찾는다 (글자 크기 무관).
+
+    조건: ① 줄 텍스트가 'N.' (또는 'N. [정답]…' 한 줄)  ② 단의 글자 중 가장 왼쪽에 붙어 있음
+          ③ 'N.' 단독 줄이면 같은 높이 오른쪽 25pt 안에 '정답' 이 있음
+    """
+    texts = [it for it in items if it.kind == "text"]
+    col_left: Dict[int, float] = {}
+    for it in texts:
+        c = layout.col_of(it.rect)
+        col_left[c] = min(col_left.get(c, 1e9), it.rect.x0)
+    hs = []
+    for it in texts:
+        t = it.text.strip()
+        m = MC_HEAD_INLINE_RE.match(t)
+        if not m:
+            m = MC_HEAD_RE.match(re.sub(r"\s+", "", t))
+            if not m:
+                continue
+            cy = (it.rect.y0 + it.rect.y1) / 2
+            if not any("정답" in o.text and abs((o.rect.y0 + o.rect.y1) / 2 - cy) < 3
+                       and 0 <= o.rect.x0 - it.rect.x1 < 25 for o in texts):
+                continue
+        num = int(m.group(1))
+        if not 1 <= num <= 30:
+            continue
+        c = layout.col_of(it.rect)
+        if it.rect.x0 - col_left.get(c, it.rect.x0) > 4:
+            continue                                  # 단 왼쪽 끝에 붙어 있어야 함 (본문 속 'N.' 배제)
+        hs.append(Heading(num, it.rect, page_no, c))
+    hs.sort(key=lambda h: (h.col, h.rect.y0))
+    return hs
+
+
+def multicol_labels(items: List[Item]) -> List[Tuple[Item, Optional[str]]]:
+    """과목 라벨·[해설] 라벨 목록 → (항목, 과목코드 또는 None('해설' 라벨))."""
+    out = []
+    for it in items:
+        if it.kind != "text" or it.size < MC_LABEL_MIN_SIZE:
+            continue
+        m = MC_LABEL_RE.match(it.text.strip())
+        if not m:
+            continue
+        key = re.sub(r"\s+", "", m.group(1))
+        out.append((it, MC_LABEL_SUBJ.get(key)))
+    return out
+
+
+def _unify_multicol(layouts: List[Layout]):
+    """[패치 12] 같은 문서에서 3단 쪽의 구분선과 x 가 같은 세로선 1개짜리 쪽(마지막 쪽 등)을 3단으로 맞춘다."""
+    multi = [l for l in layouts if l.ncols >= 3]
+    if not multi:
+        return
+    ref = multi[0]
+    for l in layouts:
+        if l.ncols == 2 and any(abs(l.divider - d) < 3 for d in ref.dividers):
+            l.dividers = list(ref.dividers)
+            l.divider = ref.dividers[0]
+            if ref.top < l.top:
+                l.top = ref.top
 
 
 # ------------------------------------------- 패치 8: 외곽선 PDF 감지 -----
@@ -443,20 +591,121 @@ def _outline_pass(pages: List[PageInfo], per_page: List[tuple], kind: str) -> Li
     return notes
 
 
+# ------------------------------------- 패치 11: 이미지 글자 PDF 감지 -----
+IMGTXT_TOKEN_W = (9.0, 26.0)     # 번호 이미지("N.") 폭 범위(pt) — 한 자리 ≈14, 두 자리 ≈19
+IMGTXT_TOKEN_H = (9.0, 20.0)     # 번호 이미지 높이 범위(pt) — 문제 ≈12.6
+IMGTXT_LEFT_TOL = 15.0           # 단 왼쪽 가장자리에서 허용 오프셋(pt)
+IMGTXT_MIN_IMAGES = 12           # 쪽당 이미지 수가 이 이상이면 '글자가 이미지인 PDF' 로 본다
+IMGTXT_HEAD_RATIO = 1.08         # 번호 이미지 높이 ÷ 본문 낱말 이미지 높이(중앙값) 하한 — 13pt/11pt ≈ 1.15
+
+
+def _imgtxt_tokens(pno: int, layout: Layout, items: List[Item]) -> List[dict]:
+    """단 왼쪽 가장자리에 붙은 작은 이미지(문항 번호 'N.' 이미지) 후보를 찾는다."""
+    out = []
+    for it in items:
+        if it.kind != "image":
+            continue
+        r = it.rect
+        if not (IMGTXT_TOKEN_W[0] < r.width < IMGTXT_TOKEN_W[1] and IMGTXT_TOKEN_H[0] < r.height < IMGTXT_TOKEN_H[1]):
+            continue
+        col = layout.col_of(r)
+        x0, _ = layout.col_bounds(col)
+        if r.x0 - x0 > IMGTXT_LEFT_TOL or r.x0 < x0 - 6:
+            continue
+        if not (layout.top < (r.y0 + r.y1) / 2 < layout.bottom):
+            continue
+        # 같은 줄 왼쪽에 다른 이미지가 있으면 본문 (번호는 줄의 첫 요소)
+        cy = (r.y0 + r.y1) / 2
+        if any(o.kind == "image" and o.rect.x1 <= r.x0 + 0.5 and o.rect.y0 < cy < o.rect.y1
+               and o.rect.x0 > x0 - 6 for o in items):
+            continue
+        out.append({"page": pno, "col": col, "y0": r.y0, "rect": pymupdf.Rect(r), "h": r.height, "w": r.width})
+    out.sort(key=lambda t: (t["col"], t["y0"]))
+    return out
+
+
+def _imgtxt_number(tokens: List[dict], label: str, notes: List[str]) -> List[dict]:
+    """읽기 순서대로 1~22, 그 뒤 23~30 반복으로 번호를 매긴다 (수능 수학 구성).
+
+    이미지 글자는 판독할 수 없으므로 순서로 정한다. 한 자리(1~9) 이미지는 두 자리보다 좁아야
+    한다는 점으로 순서 가정이 맞는지 검증하고, 개수가 22+8k 가 아니면 경고를 남긴다.
+    """
+    n = len(tokens)
+    if n == 0:
+        return []
+    for i, t in enumerate(tokens):
+        t["num"] = i + 1 if i < 22 else 23 + (i - 22) % 8
+    if n < 22 or (n - 22) % 8 != 0:
+        notes.append(f"{label}: 번호 이미지 {n}개 — 22+8k 가 아니어서 번호가 어긋났을 수 있음 (누락·오탐 확인)")
+    single = [t["w"] for t in tokens[:9]]
+    double = [t["w"] for t in tokens[9:]]
+    if single and double and not (max(single) < min(double) * 0.9):
+        notes.append(f"{label}: 한 자리/두 자리 번호 이미지 폭이 구분되지 않음 — 순서 배정이 틀렸을 수 있음")
+    return tokens
+
+
+def _imgtxt_pass(pages: List[PageInfo], kind: str) -> List[str]:
+    """글자가 전부 이미지로 들어간 PDF(강대 K 문제지 등)에서 번호 이미지를 문항 제목으로 삼는다."""
+    notes: List[str] = ["이미지 글자 PDF 감지 모드 (본문·번호가 텍스트가 아닌 이미지 — 번호는 읽기 순서로 배정)"]
+    tokens: List[dict] = []
+    for p in pages:
+        tokens += _imgtxt_tokens(p.no, p.layout, p.items)
+    tokens.sort(key=lambda t: (t["page"], t["col"], t["y0"]))
+    # 본문 낱말 이미지(≈11pt)와 번호 이미지(≈13pt)를 높이로 가른다: 전체 이미지 높이의 중앙값이 본문 크기
+    body_h = sorted(it.rect.height for p in pages for it in p.items if it.kind == "image")
+    if body_h:
+        med = body_h[len(body_h) // 2]
+        tokens = [t for t in tokens if t["h"] >= IMGTXT_HEAD_RATIO * med]
+    if not tokens:
+        notes.append("번호 이미지 후보를 찾지 못함 — 양식이 다르거나 스캔(통이미지) PDF")
+        return notes
+    heights = sorted(t["h"] for t in tokens)
+    if kind == "문제":
+        prob_t, sol_t = tokens, []
+    elif kind == "해설":
+        prob_t, sol_t = [], tokens
+    else:
+        if heights[-1] / heights[0] >= OUTLINE_SOL_SPLIT:
+            thr = (heights[0] + heights[-1]) / 2
+            prob_t = [t for t in tokens if t["h"] < thr]
+            sol_t = [t for t in tokens if t["h"] >= thr]
+        else:
+            notes.append("합본인데 번호 이미지 크기가 한 무리뿐 — 전부 문제 번호로 간주")
+            prob_t, sol_t = tokens, []
+    for name, ts, attr in (("문제", prob_t, "prob_heads"), ("해설", sol_t, "sol_heads")):
+        for t in _imgtxt_number(ts, name, notes):
+            getattr(pages[t["page"]], attr).append(Heading(t["num"], t["rect"], t["page"], t["col"]))
+    for p in pages:
+        p.prob_heads.sort(key=lambda h: (h.col, h.rect.y0))
+        p.sol_heads.sort(key=lambda h: (h.col, h.rect.y0))
+    notes.append("페이지 머릿말의 과목명을 읽을 수 없어 23번이 나올 때마다 "
+                 f"{'→'.join(DEFAULT_ORDER)} 순서로 과목을 배정함")
+    return notes
+
+
 def analyze(path: str, kind: str = "합본") -> Analysis:
     """PDF 전체를 한 번 훑어 페이지별 레이아웃·항목·문항 제목을 찾고, 문제/해설 구간을 나눈다.
 
     [패치 8] 텍스트가 전혀 없으면 외곽선 감지 모드로 전환한다. kind('문제'|'해설'|'합본')는
-    외곽선 모드에서 번호 크기 무리를 나누는 데만 쓰인다 (텍스트 PDF 에서는 영향 없음).
+    외곽선 모드에서 번호 크기 무리를 나누는 데 쓰인다.
+    [패치 10] kind='문제' 이면 해설 구간을 나누지 않는다 (전 페이지가 문제 구간).
     """
     doc = pymupdf.open(path)
     pages: List[PageInfo] = []
     per_page: List[tuple] = []
+    # [패치 12] 레이아웃을 먼저 모두 구해 3단 구분선을 문서 단위로 맞춘다
+    all_drawings = [page.get_drawings() for page in doc]
+    layouts = [analyze_layout(page, dr) for page, dr in zip(doc, all_drawings)]
+    _unify_multicol(layouts)
     for pno, page in enumerate(doc):
-        drawings = page.get_drawings()
-        layout = analyze_layout(page, drawings)
+        drawings, layout = all_drawings[pno], layouts[pno]
         items, hidden = collect_items(page, layout, drawings)
         sol = find_headings(items, layout, pno, SOL_HEADING_SIZE, strict=True)
+        if layout.ncols >= 3 and kind != "문제":
+            # [패치 12] 3단 쪽: `N. [정답]` 꼴 해설 번호 (크기 무관)
+            sol += [h for h in find_multicol_sol_heads(items, layout, pno)
+                    if not any(s.rect == h.rect for s in sol)]
+            sol.sort(key=lambda h: (h.col, h.rect.y0))
         prob = [h for h in find_headings(items, layout, pno, PROB_HEADING_SIZE, strict=False)
                 if not any(s.rect == h.rect for s in sol)]
         text = page.get_text("text")
@@ -473,16 +722,59 @@ def analyze(path: str, kind: str = "합본") -> Analysis:
     notes: List[str] = []
     if outline:
         notes = _outline_pass(pages, per_page, kind)
+    elif not any(p.prob_heads or p.sol_heads for p in pages):
+        # [패치 11] 텍스트는 있지만(수식 폰트 등) 번호를 못 찾았고, 쪽마다 이미지가 많으면
+        # 글자가 이미지로 들어간 PDF (강대 K 문제지) — 번호 이미지를 문항 제목으로 쓴다.
+        n_img = sum(1 for p in pages for it in p.items if it.kind == "image")
+        if pages and n_img / len(pages) >= IMGTXT_MIN_IMAGES:
+            notes = _imgtxt_pass(pages, kind)
+    elif kind == "합본" and not any(p.prob_heads for p in pages):
+        # [패치 12] 해설 번호는 텍스트로 잡혔지만 문제 번호가 없는 합본 — 해설 번호가 처음 나오는 쪽
+        # 앞의 쪽들이 이미지 글자 문제지면 그 쪽들에만 이미지 글자 감지를 돌린다.
+        first_sol = min((p.no for p in pages if p.sol_heads), default=len(pages))
+        front = [p for p in pages if p.no < first_sol]
+        n_img = sum(1 for p in front for it in p.items if it.kind == "image")
+        if front and n_img / len(front) >= IMGTXT_MIN_IMAGES:
+            notes = _imgtxt_pass(front, "문제")
 
-    sol_pages = [p.no for p in pages if p.sol_heads]
-    sol_start = sol_pages[0] if sol_pages else len(pages)
-    # 정답표 페이지가 해설 첫 제목보다 앞에 있으면 거기부터 해설 구간
-    for p in pages:
-        if p.has_answer_table and not p.prob_heads and p.no < sol_start:
-            sol_start = p.no
-            break
+    n_sol_raw = sum(len(p.sol_heads) for p in pages)      # 진단용 (병합 전 해설 크기 번호 수)
+    if kind == "문제":
+        # [패치 10] 문제 파일에는 해설이 없다. 해설 크기(≥17pt)로 잡힌 번호도 문제 번호로 쓰고,
+        # 해설 구간을 나누지 않는다 — 번호가 크거나 마침표 없는 문제지 양식에서 문제 페이지가
+        # 통째로 해설 구간으로 넘어가 0개가 되는 일을 막는다.
+        for p in pages:
+            for s in p.sol_heads:
+                if not any(h.rect == s.rect for h in p.prob_heads):
+                    p.prob_heads.append(s)
+            p.sol_heads = []
+            p.prob_heads.sort(key=lambda h: (h.col, h.rect.y0))
+        if n_sol_raw and not outline:
+            notes.append(f"문제 파일: 해설 크기(≥{SOL_HEADING_SIZE}pt) 번호 {n_sol_raw}개를 문제 번호로 사용함")
+        sol_start = len(pages)
+    else:
+        sol_pages = [p.no for p in pages if p.sol_heads]
+        sol_start = sol_pages[0] if sol_pages else len(pages)
+        # 정답표 페이지가 해설 첫 제목보다 앞에 있으면 거기부터 해설 구간
+        for p in pages:
+            if p.has_answer_table and not p.prob_heads and p.no < sol_start:
+                sol_start = p.no
+                break
     problem_pages = [p.no for p in pages if p.no < sol_start and p.prob_heads]
     solution_pages = [p.no for p in pages if p.no >= sol_start]
+
+    # [패치 10] 문제/합본인데 문제 문항이 0개면 원인을 가늠할 진단문을 남긴다
+    if kind in ("문제", "합본") and not problem_pages:
+        n_prob = sum(len(p.prob_heads) for p in pages)
+        n_sol = n_sol_raw
+        n_big = sum(1 for p in pages for it in p.items
+                    if it.kind == "text" and it.size >= PROB_HEADING_SIZE and re.match(r"^\d{1,2}", it.text))
+        notes.append(
+            f"문제 문항 0개 진단 — 전체 {len(pages)}쪽 중 텍스트 있는 쪽 {text_pages}, "
+            f"문제 번호(≥{PROB_HEADING_SIZE}pt 'N.') {n_prob}개, 해설 크기(≥{SOL_HEADING_SIZE}pt) 번호 {n_sol}개, "
+            f"숫자로 시작하는 큰 글자 줄 {n_big}개, 해설 구간 시작 쪽 {sol_start + 1 if sol_start < len(pages) else '없음'}"
+            + (" — 번호가 전부 해설 크기로 잡힘: 문제지 번호가 크거나 마침표가 없는 양식일 수 있음" if n_sol and not n_prob else "")
+            + (" — 번호가 있는데 해설 구간 뒤로 밀림: 파일명 종류 표기(_문제/_문)를 확인" if n_prob and kind == "합본" else "")
+            + (" — 큰 글자 숫자 줄은 있는데 'N.' 꼴이 아님: 마침표 없는 문제 번호 양식 의심" if n_big and not n_prob and not n_sol else ""))
 
     # [패치 9] 해설에 23번 이상이 있는데 과목 텍스트(확률과 통계/미적분/기하)를 한 쪽도 못 읽었으면
     # 23번이 다시 나올 때마다 확통→미적→기하 순으로 배정된다는 것을 로그로 알린다.
@@ -536,10 +828,11 @@ def make_clip(bbox: pymupdf.Rect, layout: Layout, col: int, pad: float, full_wid
         cx0, cx1 = x0 - pad, x1 + pad
     else:
         cx0, cx1 = bbox.x0 - pad, bbox.x1 + pad
-    if col == 0:
-        cx1 = min(cx1, layout.divider - 1.5)
-    else:
-        cx0 = max(cx0, layout.divider + 1.5)
+    # [패치 12] N단: 왼쪽·오른쪽 구분선 밖으로 나가지 않게
+    if col > 0:
+        cx0 = max(cx0, layout.dividers[col - 1] + 1.5)
+    if col < len(layout.dividers):
+        cx1 = min(cx1, layout.dividers[col] - 1.5)
     cx0, cx1 = max(cx0, 0), min(cx1, layout.width)
     cy0, cy1 = max(bbox.y0 - pad, 0), min(bbox.y1 + pad, layout.height)
     return pymupdf.Rect(cx0, cy0, cx1, cy1)
@@ -577,7 +870,7 @@ def plan_problems(an: Analysis, exam: str, pad: float, order=DEFAULT_ORDER) -> L
     for pno in an.problem_pages:
         p = an.pages[pno]
         tracker.set_page_hint(p.subject_hint)
-        for col in (0, 1):
+        for col in range(p.layout.ncols):
             heads = [h for h in p.prob_heads if h.col == col]
             for i, h in enumerate(heads):
                 y0 = h.rect.y0 - 2
@@ -599,15 +892,26 @@ def plan_solutions(an: Analysis, exam: str, pad: float, split: bool, order=DEFAU
     tracker = SubjectTracker(list(order))
     jobs: List[Job] = []
     current: Optional[Job] = None
+    # [패치 12] 3단 해설: 과목은 읽기 순서상 가장 최근의 과목 라벨로 정한다
+    label_subj: Optional[str] = None
     for pno in an.solution_pages:
         p = an.pages[pno]
         tracker.set_page_hint(p.subject_hint)
-        for col in (0, 1):
+        multicol = p.layout.ncols >= 3
+        for col in range(p.layout.ncols):
             heads = [h for h in p.sol_heads if h.col == col]
             bounds = [p.layout.top] + [h.rect.y0 - 3 for h in heads] + [p.layout.bottom + 3]
             for i in range(len(bounds) - 1):
                 its = region_items(p.items, p.layout, col, bounds[i], bounds[i + 1])
-                if i == 0 and any(it.kind == "text" and SECTION_LABEL.match(it.text) for it in its):
+                labels = []
+                if multicol:
+                    # [패치 12] 라벨이 조각 중간에 있으면 그 윗선에서 끊는다 (라벨·정답표는 버림)
+                    labels = sorted(multicol_labels(its), key=lambda lb: lb[0].rect.y0)
+                    if labels:
+                        cut = labels[0][0].rect.y0 - 2
+                        its = [it for it in its
+                               if ((it.rect.y0 + it.rect.y1) / 2 < cut) and not (it.kind == "draw" and it.rect.y1 > cut)]
+                elif i == 0 and any(it.kind == "text" and SECTION_LABEL.match(it.text) for it in its):
                     its = []              # 과목 구분 라벨이 있는 선두 조각은 버림
                 if i == 0 and its and heads and heads[0].num == 23 \
                         and not any(it.kind == "text" for it in its):
@@ -619,8 +923,14 @@ def plan_solutions(an: Analysis, exam: str, pad: float, split: bool, order=DEFAU
                         its = []
                 if i > 0:
                     h = heads[i - 1]
-                    current = Job("해설", tracker.subject_for(h.num), h.num, exam, [], split)
+                    subj = tracker.subject_for(h.num)
+                    if multicol and label_subj and ((label_subj == "공통") == (h.num <= 22)):
+                        subj = label_subj     # [패치 12] 라벨 과목 우선 (번호 범위와 맞을 때만)
+                    current = Job("해설", subj, h.num, exam, [], split)
                     jobs.append(current)
+                for _lb, s in labels:     # [패치 12] 이 조각 뒤에 오는 문항부터 라벨 과목 적용
+                    if s:
+                        label_subj = s
                 if current is None:       # 첫 문항 이전(정답표 등)
                     continue
                 bbox = union([it.rect for it in its])
@@ -707,7 +1017,7 @@ def render_job_pdf(doc: pymupdf.Document, job: Job, outdir: str) -> List[str]:
 
 # ------------------------------------------------------- 파일 단위 처리 -----
 def clean_exam_name(name: str) -> str:
-    """시험지명에서 _문제/_해설 표시를 모두 떼어낸다 (출력 파일명에는 종류가 따로 붙으므로)."""
+    """시험지명에서 _문제/_해설(_문/_해) 표시를 모두 떼어낸다 (출력 파일명에는 종류가 따로 붙으므로)."""
     name = unicodedata.normalize("NFC", name.strip())
     while True:
         m = KIND_RE.search(name)
@@ -717,14 +1027,24 @@ def clean_exam_name(name: str) -> str:
     return re.sub(r"[_\-\s]{2,}", "_", name).strip("_- ")
 
 
+def kind_of_match(m: "re.Match") -> str:
+    """KIND_RE 일치 결과 → '문제' | '해설'.  [패치 10] 축약형(group 2)도 함께 판정."""
+    g = m.group(1) or m.group(2) or ""
+    return "해설" if "해" in g else "문제"
+
+
 def classify_filename(path: str) -> Tuple[str, str]:
-    """파일명 → (시험지명, 종류). 종류는 '문제' | '해설' | '합본'."""
+    """파일명 → (시험지명, 종류). 종류는 '문제' | '해설' | '합본'.
+
+    [패치 10] `_문제`/`_해설` 외에 `_문`/`_해` 축약 표기도 인식한다.
+      K25(260915)_문.pdf → ('K25(260915)', '문제'),  K25(260915)_해.pdf → ('K25(260915)', '해설')
+    """
     # macOS 파일명은 한글이 자모 분리형(NFD)으로 저장되므로 완성형(NFC)으로 맞춘 뒤 판별한다.
     stem = unicodedata.normalize("NFC", os.path.splitext(os.path.basename(path))[0])
     kind = "합본"
     m = KIND_RE.search(stem)
     if m:
-        kind = "해설" if "해설" in m.group(1) else "문제"
+        kind = kind_of_match(m)
     return clean_exam_name(stem) or stem, kind
 
 
@@ -804,7 +1124,7 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("pdfs", nargs="+")
     ap.add_argument("--out", default="crops", help="출력 폴더 (기본: ./crops)")
-    ap.add_argument("--exam", default=None, help="시험지명 (기본: 파일명에서 _문제/_해설 을 뗀 이름)")
+    ap.add_argument("--exam", default=None, help="시험지명 (기본: 파일명에서 _문제/_해설(_문/_해) 을 뗀 이름)")
     ap.add_argument("--kind", choices=["auto", "문제", "해설", "합본"], default="auto")
     ap.add_argument("--margin", type=float, default=3.0, help="본문 주변 여백(mm)")
     ap.add_argument("--dpi", type=int, default=600)

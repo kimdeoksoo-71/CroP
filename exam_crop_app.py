@@ -9,6 +9,14 @@ CroP — 수능/모의고사 수학 시험지 문항 분할 앱 (macOS, tkinter,
 [패치 9] 도구막대 버튼을 직접 그리는 방식으로 바꿔 세로 높이를 키웠다 (기존의 약 1.5배).
          macOS 기본(aqua) ttk 버튼은 높이가 고정이라 글자에 비해 납작해 보였음.
          높이는 TB_BTN_PADY 상수로 조절한다.
+[패치 10 · 2026-09-19]
+  1) 상태막대 진행 표시를 「문제 12/46 · 해설 0/46 문항」 처럼 문제·해설로 나눠 센다.
+     종전 「92 / 92 문항」은 문제 46 + 해설 46 을 합친 수라 파일 수처럼 보였다.
+     (조각 _c1/_c2… 나 PNG+PDF 동시 출력으로 파일이 늘어나도 문항 수는 변하지 않는다.
+      파일 수는 완료 시 「완료 — N개 파일」에 따로 표시된다.)
+  2) 파일마다 분석 결과 한 줄을 로그에 남긴다:
+     「[파일명] 종류=문제 · 문항 46 (문제 페이지 20, 해설 페이지 0)」
+     문제/해설 어느 쪽이 0개인지, 종류가 뭐로 판정됐는지 바로 볼 수 있다.
 """
 from __future__ import annotations
 
@@ -88,6 +96,12 @@ def fmt_label(cfg: dict) -> str:
     """현재 출력 형식 표시용 문자열."""
     parts = (["PNG"] if cfg.get("out_png", True) else []) + (["PDF"] if cfg.get("out_pdf") else [])
     return "+".join(parts) or "PNG"
+
+
+def fmt_count(dp: int, tp: int, ds: int, ts: int) -> str:
+    """[패치 10] 진행 문항 수 표시: 「문제 12/46 · 해설 0/46 문항」 (없는 종류는 생략)."""
+    parts = ([f"문제 {dp}/{tp}"] if tp else []) + ([f"해설 {ds}/{ts}"] if ts else [])
+    return (" · ".join(parts) + " 문항") if parts else "0 문항"
 
 
 class ToolButton(tk.Label):
@@ -201,6 +215,8 @@ class App(tk.Tk):
         self.worker: Optional[threading.Thread] = None
         self.stop_flag = False
         self.total = 0
+        self.total_p = 0          # [패치 10] 문제 문항 수 / 해설 문항 수
+        self.total_s = 0
         self.q: queue.Queue = queue.Queue()
         self._style()
         self._build_ui()
@@ -612,8 +628,11 @@ class App(tk.Tk):
                         self.q.put(("log", f"[{os.path.basename(path)}] 분석 실패: {e}"))
                         self.q.put(("summary", s, f"실패: {e}", []))
                         continue
-                    if kind == "합본":
-                        self.q.put(("log", f"[{os.path.basename(path)}] 합본 감지: 문제 {len(an.problem_pages)}쪽 + 해설 {len(an.solution_pages)}쪽"))
+                    # [패치 10] 파일마다 분석 결과 한 줄 — 종류 판정과 문제/해설 문항 수를 바로 볼 수 있게
+                    jp = sum(1 for j in jobs if j.kind == "문제")
+                    js = sum(1 for j in jobs if j.kind == "해설")
+                    self.q.put(("log", f"[{os.path.basename(path)}] 종류={kind} · 문항 {len(jobs)}"
+                                       f" (문제 {jp} / 해설 {js}; 문제 페이지 {len(an.problem_pages)}, 해설 페이지 {len(an.solution_pages)})"))
                     for note in getattr(an, "notes", []):      # [패치 8] 외곽선 감지 모드 등 안내
                         self.q.put(("log", f"[{os.path.basename(path)}] {note}"))
                     if not jobs:
@@ -629,24 +648,31 @@ class App(tk.Tk):
                     total += len(jobs)
                 n_set = sum(len(j) for ss, _, _, j in plans if ss is s)
                 self.q.put(("status", s, f"대기 ({n_set}문항)"))
-            self.q.put(("total", total))
+            total_p = sum(1 for _, _, _, jobs in plans for j in jobs if j.kind == "문제")
+            total_s = sum(1 for _, _, _, jobs in plans for j in jobs if j.kind == "해설")
+            self.q.put(("total", total, total_p, total_s))
 
             done = 0
+            done_p = done_s = 0                       # [패치 10] 지금까지 끝난 문제/해설 문항 수
             done_jobs: Dict[ExamSet, List[core.Job]] = {}
             for s, path, kind, jobs in plans:
                 if self.stop_flag:
                     break
                 self.q.put(("status", s, "처리 중"))
-                base_done = done
+                base_done, base_p, base_s = done, done_p, done_s
 
-                def prog(i, n, name, base_done=base_done):
+                def prog(i, n, name, jobs=jobs, base_done=base_done, base_p=base_p, base_s=base_s):
                     if name:
-                        self.q.put(("progress", base_done + i, name))
+                        dp = base_p + sum(1 for j in jobs[:i] if j.kind == "문제")
+                        ds = base_s + sum(1 for j in jobs[:i] if j.kind == "해설")
+                        self.q.put(("progress", base_done + i, name, dp, ds))
 
                 written = core.run_jobs(path, jobs, cfg["dpi"], out_dir, prog, lambda: self.stop_flag,
                                         png=want_png, pdf=want_pdf)
                 done += len(jobs)
-                self.q.put(("progress", done, ""))
+                done_p += sum(1 for j in jobs if j.kind == "문제")
+                done_s += sum(1 for j in jobs if j.kind == "해설")
+                self.q.put(("progress", done, "", done_p, done_s))
                 self.q.put(("written", written))
                 done_jobs.setdefault(s, []).extend(jobs)
                 all_jobs = done_jobs[s]
@@ -673,14 +699,14 @@ class App(tk.Tk):
                 msg = self.q.get_nowait()
                 kind = msg[0]
                 if kind == "total":
-                    self.total = msg[1]
+                    self.total, self.total_p, self.total_s = msg[1], msg[2], msg[3]
                     self.pbar.config(maximum=max(1, self.total), value=0)
-                    self.count_var.set(f"0 / {self.total} 문항")
+                    self.count_var.set(fmt_count(0, self.total_p, 0, self.total_s))
                     self.status_var.set(f"{len(self.sets)}개 세트 처리 중")
                 elif kind == "progress":
-                    i, name = msg[1], msg[2]
+                    i, name, dp, ds = msg[1], msg[2], msg[3], msg[4]
                     self.pbar.config(value=i)
-                    self.count_var.set(f"{i} / {self.total} 문항")
+                    self.count_var.set(fmt_count(dp, self.total_p, ds, self.total_s))
                     self.current_var.set(name)
                 elif kind == "status":
                     msg[1].status = msg[2]
