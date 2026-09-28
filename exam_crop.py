@@ -97,6 +97,16 @@ CLI
     5) 해설 쪽 번호가 텍스트로 잡혀도, 문제 쪽이 이미지 글자(패치 11)이면 문제 쪽에만
        이미지 글자 감지를 따로 돌린다 (종전에는 번호가 하나라도 잡히면 이미지 감지를 건너뜀).
 
+[패치 13 · 2026-09-28 — 이미지 글자 모드: 단 바닥 「※ 확인 사항」 안내 박스 제외 (강대 K28 문제지)]
+  텍스트 모드는 '확인 사항' 문구(EXCLUDE_TEXT)에서 영역을 끊지만, 이미지 글자 PDF 는 그 문구도
+  이미지라 22번·각 선택과목 30번처럼 단의 마지막 문항 아래에 안내 박스가 통째로 딸려 들어갔다.
+    1) 단 폭의 90% 이상인 윗변·아랫변 가로선 + 양 끝 세로선으로 된 사각형이
+       아랫변이 본문 바닥(단 구분선 아래끝)에 ±3pt 로 붙어 있고, 높이가 본문의 25% 이하이며,
+       안에 문항 번호가 없으면 안내 박스로 본다.
+    2) 그 박스의 선과 안의 글자 이미지를 항목에서 빼서 문항 영역이 박스 위에서 끝나게 한다.
+    3) 이미지 글자 모드(_imgtxt_pass)에서만 동작 — 텍스트·외곽선 모드와 해설은 종전과 같다.
+       (26K28: 1공통22·3확통30·4미적30·5기하30 네 문항만 바뀌고 나머지 42문항·해설 46문항은 동일)
+
 GUI 앱은 exam_crop_app.py 참고.
 """
 from __future__ import annotations
@@ -624,6 +634,65 @@ def _imgtxt_tokens(pno: int, layout: Layout, items: List[Item]) -> List[dict]:
     return out
 
 
+IMGTXT_NOTICE_SPAN = 0.90        # [패치 13] 안내 박스 가로선 길이 ÷ 단 폭 하한
+IMGTXT_NOTICE_BOTTOM_TOL = 3.0   # [패치 13] 박스 아랫변과 본문 바닥(단 구분선 아래끝)의 허용 차(pt)
+IMGTXT_NOTICE_MAX_H = 0.25       # [패치 13] 박스 높이 ÷ 본문 높이 상한
+
+
+def _imgtxt_notice_boxes(p: PageInfo) -> List[pymupdf.Rect]:
+    """[패치 13] 단 바닥에 붙은 「※ 확인 사항」 안내 박스를 선 모양으로 찾는다.
+
+    이미지 글자 PDF 에서는 '확인 사항' 문구도 이미지라 EXCLUDE_TEXT 로 걸러지지 않는다.
+    단 폭 전체(≥90%)에 걸친 윗변·아랫변 가로선 + 양 끝 세로선으로 된 사각형이고,
+    아랫변이 본문 바닥에 붙어 있으며(±3pt), 높이가 본문의 25% 이하이고, 안에 문항 번호가 없으면
+    안내 박스로 본다. (문항 안의 조건·보기 박스는 들여쓰기돼 단 폭 전체가 아니고 바닥에 붙지 않는다)
+    """
+    L = p.layout
+    draws = [it.rect for it in p.items if it.kind == "draw"]
+    heads = p.prob_heads + p.sol_heads
+    out: List[pymupdf.Rect] = []
+    for col in range(L.ncols):
+        x0, x1 = L.col_bounds(col)
+        cw = x1 - x0
+        hl = [r for r in draws if r.height < 2.5 and r.width >= IMGTXT_NOTICE_SPAN * cw
+              and x0 - 8 <= r.x0 and r.x1 <= x1 + 8]
+        bottoms = [r for r in hl if abs(r.y1 - L.bottom) <= IMGTXT_NOTICE_BOTTOM_TOL]
+        if not bottoms:
+            continue
+        bot = max(bottoms, key=lambda r: r.y1)
+        for top in sorted((r for r in hl if r.y1 < bot.y0 - 10), key=lambda r: -r.y0):
+            h = bot.y1 - top.y0
+            if h > IMGTXT_NOTICE_MAX_H * (L.bottom - L.top):
+                break
+            vl = [r for r in draws if r.width < 2.5 and r.y0 <= top.y1 + 2 and r.y1 >= bot.y0 - 2]
+            left_ok = any(abs(r.x0 - top.x0) <= 3 for r in vl)
+            right_ok = any(abs(r.x1 - top.x1) <= 3 for r in vl)
+            if not (left_ok and right_ok):
+                continue
+            box = pymupdf.Rect(min(top.x0, bot.x0) - 1, top.y0 - 1, max(top.x1, bot.x1) + 1, bot.y1 + 1)
+            if any(box.contains(hd.rect) for hd in heads):
+                continue
+            out.append(box)
+            break
+    return out
+
+
+def _imgtxt_drop_notices(pages: List[PageInfo], notes: List[str]):
+    """[패치 13] 안내 박스와 그 안의 글자 이미지를 항목에서 뺀다 (문항 영역에 딸려 들어가지 않게)."""
+    n = 0
+    for p in pages:
+        boxes = _imgtxt_notice_boxes(p)
+        if not boxes:
+            continue
+        def inside(r: pymupdf.Rect) -> bool:
+            c = pymupdf.Point((r.x0 + r.x1) / 2, (r.y0 + r.y1) / 2)
+            return any(b.contains(c) for b in boxes)
+        p.items = [it for it in p.items if not inside(it.rect)]
+        n += len(boxes)
+    if n:
+        notes.append(f"단 바닥의 안내 박스(※ 확인 사항 등) {n}개를 문항 영역에서 제외함")
+
+
 def _imgtxt_number(tokens: List[dict], label: str, notes: List[str]) -> List[dict]:
     """읽기 순서대로 1~22, 그 뒤 23~30 반복으로 번호를 매긴다 (수능 수학 구성).
 
@@ -678,6 +747,7 @@ def _imgtxt_pass(pages: List[PageInfo], kind: str) -> List[str]:
     for p in pages:
         p.prob_heads.sort(key=lambda h: (h.col, h.rect.y0))
         p.sol_heads.sort(key=lambda h: (h.col, h.rect.y0))
+    _imgtxt_drop_notices(pages, notes)          # [패치 13]
     notes.append("페이지 머릿말의 과목명을 읽을 수 없어 23번이 나올 때마다 "
                  f"{'→'.join(DEFAULT_ORDER)} 순서로 과목을 배정함")
     return notes
