@@ -7,7 +7,8 @@ CLI
                                                           [--pdf | --pdf-only]
 
   파일명에 `_문제`(또는 `_문`) 가 있으면 문제지, `_해설`(또는 `_해`) 이 있으면 해설지.   [패치 10: _문/_해 축약형 추가]
-  둘 다 없거나 둘 다 있으면 합본으로 보고 **처리하지 않는다** — 문제지·해설지를 따로 나눠 넣어야 한다. [패치 14]
+  둘 다 없거나 둘 다 있으면 합본 — 「정답 및 해설」 표지 쪽에서 문제 구간과 해설 구간으로 나눈다. [패치 22]
+  표지를 읽을 수 없는 합본은 거부한다 (문제지·해설지를 나눠 넣으면 처리된다).
   --exam 을 주지 않으면 파일명에서 확장자와 _문제/_해설(_문/_해) 을 뗀 이름을 시험지명으로 쓴다.
 
 출력
@@ -125,6 +126,24 @@ CLI
     2) 그래도 0개면 기준을 '본문 크기(글자 수 가중 최빈) × 1.1'로 낮춰 `N.` 번호를 다시 찾는다.
   번호를 이미 찾는 파일은 그대로다 (26K28 문제·해설 46문항 자르는 영역 동일 확인).
 
+[패치 22 · 2026-09-30 — 합본을 「정답 및 해설」 표지로 나눈다 · 제작 도구 안내]  (보완 계획 v5 2-5·2-8, P1·P2)
+  패치 14 는 합본을 거부했다 (번호 크기로 문제/해설을 가르면 조판마다 판단이 달라서). 이제 크기가 아니라
+  **표지 텍스트**로 나눈다. 크기 기반 합본 분석(analyze 의 kind='합본')은 계속 쓰지 않는다.
+  inspect_pdf(path): 파일명 + 표지로 종류를 정한다. 예외를 던지지 않는다.
+    - 해설 파일명이면 표지 판정을 하지 않는다.
+    - 표지 후보 = 쪽 위 20% 의 줄 중 `정답 및 해설|해설지` 에 걸리고 글자 크기 ≥ 본문(문서 전체 최빈 크기) × 1.5.
+      표지 쪽 = 후보가 처음 걸린 쪽. 뒤에 연달아 걸리는 쪽은 머릿말 반복으로 본다.
+    - 합본 파일명: 본문 텍스트 없음(한글 20자 미만 쪽 ≥ 80%) → 거부 text_less / 표지 없음 → 거부 no_cover /
+      표지가 1쪽 → 해설 / k쪽(k≥2) → 합본(1..k-1 = 문제, k.. = 해설).
+    - 문제 파일명: 표지 없음 → 문제 / 1쪽이 표지 → 거부 name_conflict / k쪽 → 해설 구간에 해설 번호가 있으면 합본, 없으면 문제.
+    - 표지 구간이 2개 이상이거나 해설 구간에 문제지 머릿말(문제지·제N교시·홀수형)이 있으면 multi_exam_suspect
+      (거부하지 않고 set 레코드의 exclude_reasons 로 — 여러 회차가 한 파일에 섞인 경우).
+  group_sets(paths): 시험지명으로 묶어 세트를 판정한다 (합본 1개 / 문제+해설 / 중복 입력 / 짝 없음). 앱·러너 공용.
+  analyze·build_jobs 에 쪽 범위(pages=)를 줄 수 있다. 합본은 문제 구간·해설 구간을 각각 독립 문서처럼 분석한다
+  (좌표·쪽 번호는 원본 기준). 명령줄: --inspect (판정만 JSON), --split-page N (분할 쪽 수동 지정, 1부터).
+  P2) 번호를 하나도 못 찾았고 PDF 를 만든 도구가 macOS Quartz 또는 Microsoft Print To PDF 이면 한컴 PDF 로
+      다시 저장하라는 안내를 붙인다.
+
 [패치 21 · 2026-09-30 — 순서로 매기는 번호에 틀 적용]  (보완 계획 v5 2-4, P10)
   이미지 글자 모드는 번호를 읽지 못해 "1~22, 이후 23~30 반복" 순서로 매겼다. 12문항 세트는 9번이 01번으로
   저장됐고, 문제·해설이 똑같이 틀리면 쌍 대조도 통과했다.
@@ -199,8 +218,8 @@ import pymupdf  # PyMuPDF
 from PIL import Image
 
 # ------------------------------------------------------------ 엔진 식별 -----
-ENGINE_VERSION = "P21"                     # 패치 번호. 동작이 바뀌는 커밋마다 올린다
-CAPABILITIES = frozenset({"json", "plan_only"})   # 러너는 이 집합만 보고 새 경로를 쓴다 (완성된 기능만 넣는다)
+ENGINE_VERSION = "P22"                     # 패치 번호. 동작이 바뀌는 커밋마다 올린다
+CAPABILITIES = frozenset({"json", "plan_only", "templates", "inspect_pdf"})   # 러너는 이 집합만 보고 새 경로를 쓴다 (완성된 기능만 넣는다)
 JSON_SCHEMA = 1                            # --json 레코드 형식 번호. 필드를 빼거나 뜻을 바꾸면 올린다
 MIRROR_DIR = os.path.expanduser("~/audit_runner/crop_mirror")   # 맥미니 러너 전용 복사본 (여기서 뜨는 앱 = 러너 엔진)
 
@@ -767,6 +786,11 @@ def _outline_decode_by_template(tokens: List[dict], label: str, notes: List[str]
     return tokens
 
 
+def _page(pages: List[PageInfo], no: int) -> PageInfo:
+    """[패치 22] 쪽 번호로 PageInfo 를 찾는다 (쪽 범위 분석에서는 목록 위치 ≠ 쪽 번호)."""
+    return next(p for p in pages if p.no == no)
+
+
 def _outline_pass(pages: List[PageInfo], per_page: List[tuple], kind: str) -> List[str]:
     """텍스트가 전혀 없는(외곽선) PDF 에서 문항 번호·끝 표시를 찾아 pages 에 채워 넣는다."""
     notes: List[str] = ["외곽선 PDF 감지 모드 (텍스트 없음 — 벡터 글리프로 번호 판독)"]
@@ -801,7 +825,7 @@ def _outline_pass(pages: List[PageInfo], per_page: List[tuple], kind: str) -> Li
             continue
         decoded = _outline_decode(ts, name, notes)
         for t in decoded:
-            getattr(pages[t["page"]], attr).append(
+            getattr(_page(pages, t["page"]), attr).append(
                 Heading(t["num"], t["rect"], t["page"], t["col"]))
     for p in pages:
         p.prob_heads.sort(key=lambda h: (h.col, h.rect.y0))
@@ -973,7 +997,7 @@ def _imgtxt_pass(pages: List[PageInfo], kind: str) -> List[str]:
             prob_t, sol_t = tokens, []
     for name, ts, attr in (("문제", prob_t, "prob_heads"), ("해설", sol_t, "sol_heads")):
         for t in _imgtxt_number(ts, name, notes):
-            getattr(pages[t["page"]], attr).append(Heading(t["num"], t["rect"], t["page"], t["col"]))
+            getattr(_page(pages, t["page"]), attr).append(Heading(t["num"], t["rect"], t["page"], t["col"]))
     for p in pages:
         p.prob_heads.sort(key=lambda h: (h.col, h.rect.y0))
         p.sol_heads.sort(key=lambda h: (h.col, h.rect.y0))
@@ -1029,21 +1053,27 @@ def _small_type_pass(pages: List[PageInfo], kind: str) -> List[str]:
     return [f"작은 조판: 본문 {body}pt → 번호 기준 {min_size}pt로 낮춰 {kind} 번호 {n}개 찾음"] if n else []
 
 
-def analyze(path: str, kind: str = "합본") -> Analysis:
+def analyze(path: str, kind: str = "합본", page_range: Optional[range] = None) -> Analysis:
     """PDF 전체를 한 번 훑어 페이지별 레이아웃·항목·문항 제목을 찾고, 문제/해설 구간을 나눈다.
 
     [패치 8] 텍스트가 전혀 없으면 외곽선 감지 모드로 전환한다. kind('문제'|'해설'|'합본')는
     외곽선 모드에서 번호 크기 무리를 나누는 데 쓰인다.
     [패치 10] kind='문제' 이면 해설 구간을 나누지 않는다 (전 페이지가 문제 구간).
+    [패치 22] page_range 를 주면 그 쪽들만 독립 문서처럼 분석한다 (합본의 문제 구간·해설 구간).
+              쪽 번호·좌표는 원본 기준이고, Analysis.pages 는 문서 전체 길이 (범위 밖은 빈 쪽).
     """
     doc = pymupdf.open(path)
+    n_doc = len(doc)
+    rng = list(range(n_doc)) if page_range is None else [i for i in page_range if 0 <= i < n_doc]
+    end_no = (rng[-1] + 1) if rng else 0           # 범위 끝(쪽 번호). "해설 구간 없음"을 뜻하는 값으로도 쓴다
     pages: List[PageInfo] = []
     per_page: List[tuple] = []
     # [패치 12] 레이아웃을 먼저 모두 구해 3단 구분선을 문서 단위로 맞춘다
-    all_drawings = [page.get_drawings() for page in doc]
-    layouts = [analyze_layout(page, dr) for page, dr in zip(doc, all_drawings)]
-    _unify_multicol(layouts)
-    for pno, page in enumerate(doc):
+    all_drawings = {pno: doc[pno].get_drawings() for pno in rng}
+    layouts = {pno: analyze_layout(doc[pno], all_drawings[pno]) for pno in rng}
+    _unify_multicol(list(layouts.values()))
+    for pno in rng:
+        page = doc[pno]
         drawings, layout = all_drawings[pno], layouts[pno]
         items, hidden = collect_items(page, layout, drawings)
         sol = find_headings(items, layout, pno, SOL_HEADING_SIZE, strict=True)
@@ -1077,7 +1107,7 @@ def analyze(path: str, kind: str = "합본") -> Analysis:
     elif kind == "합본" and not any(p.prob_heads for p in pages):
         # [패치 12] 해설 번호는 텍스트로 잡혔지만 문제 번호가 없는 합본 — 해설 번호가 처음 나오는 쪽
         # 앞의 쪽들이 이미지 글자 문제지면 그 쪽들에만 이미지 글자 감지를 돌린다.
-        first_sol = min((p.no for p in pages if p.sol_heads), default=len(pages))
+        first_sol = min((p.no for p in pages if p.sol_heads), default=end_no)
         front = [p for p in pages if p.no < first_sol]
         n_img = sum(1 for p in front for it in p.items if it.kind == "image")
         if front and n_img / len(front) >= IMGTXT_MIN_IMAGES:
@@ -1090,7 +1120,7 @@ def analyze(path: str, kind: str = "합본") -> Analysis:
         # [패치 17] 번호만 이미지인 PDF: 문제 번호를 하나도 못 찾았으면 쪽당 이미지 수와 상관없이
         # 해설 번호가 처음 나오는 쪽 앞의 쪽들에서 이미지 번호를 찾는다. 찾았을 때만 채택한다.
         # (kind='문제'에서 해설 크기 번호가 있으면 아래에서 문제 번호로 쓰이므로 여기 오지 않는다.)
-        first_sol = min((p.no for p in pages if p.sol_heads), default=len(pages))
+        first_sol = min((p.no for p in pages if p.sol_heads), default=end_no)
         front = [p for p in pages if p.no < first_sol]
         if front:
             img_notes = _imgtxt_pass(front, "문제")
@@ -1110,10 +1140,10 @@ def analyze(path: str, kind: str = "합본") -> Analysis:
             p.prob_heads.sort(key=lambda h: (h.col, h.rect.y0))
         if n_sol_raw and not outline:
             notes.append(f"문제 파일: 해설 크기(≥{SOL_HEADING_SIZE}pt) 번호 {n_sol_raw}개를 문제 번호로 사용함")
-        sol_start = len(pages)
+        sol_start = end_no
     else:
         sol_pages = [p.no for p in pages if p.sol_heads]
-        sol_start = sol_pages[0] if sol_pages else len(pages)
+        sol_start = sol_pages[0] if sol_pages else end_no
         # 정답표 페이지가 해설 첫 제목보다 앞에 있으면 거기부터 해설 구간
         for p in pages:
             if p.has_answer_table and not p.prob_heads and p.no < sol_start:
@@ -1131,17 +1161,21 @@ def analyze(path: str, kind: str = "합본") -> Analysis:
         notes.append(
             f"문제 문항 0개 진단 — 전체 {len(pages)}쪽 중 텍스트 있는 쪽 {text_pages}, "
             f"문제 번호(≥{PROB_HEADING_SIZE}pt 'N.') {n_prob}개, 해설 크기(≥{SOL_HEADING_SIZE}pt) 번호 {n_sol}개, "
-            f"숫자로 시작하는 큰 글자 줄 {n_big}개, 해설 구간 시작 쪽 {sol_start + 1 if sol_start < len(pages) else '없음'}"
+            f"숫자로 시작하는 큰 글자 줄 {n_big}개, 해설 구간 시작 쪽 {sol_start + 1 if sol_start < end_no else '없음'}"
             + (" — 번호가 전부 해설 크기로 잡힘: 문제지 번호가 크거나 마침표가 없는 양식일 수 있음" if n_sol and not n_prob else "")
             + (" — 번호가 있는데 해설 구간 뒤로 밀림: 파일명 종류 표기(_문제/_문)를 확인" if n_prob and kind == "합본" else "")
             + (" — 큰 글자 숫자 줄은 있는데 'N.' 꼴이 아님: 마침표 없는 문제 번호 양식 의심" if n_big and not n_prob and not n_sol else ""))
 
     # [패치 9] 해설에 23번 이상이 있는데 과목 텍스트(확률과 통계/미적분/기하)를 한 쪽도 못 읽었으면
     # 23번이 다시 나올 때마다 확통→미적→기하 순으로 배정된다는 것을 로그로 알린다.
-    sel = [h.num for pno in solution_pages for h in pages[pno].sol_heads if h.num >= 23]
-    if sel and not any(pages[pno].subject_hint for pno in solution_pages):
+    by_no = {p.no: p for p in pages}
+    sel = [h.num for pno in solution_pages for h in by_no[pno].sol_heads if h.num >= 23]
+    if sel and not any(by_no[pno].subject_hint for pno in solution_pages):
         notes.append("해설에서 과목 라벨을 텍스트로 읽지 못함 — 23번이 나올 때마다 "
                      f"{'→'.join(DEFAULT_ORDER)} 순서로 과목을 배정함 (빠른 정답표 순서와 같은지 확인)")
+    if len(pages) != n_doc:                       # [패치 22] 쪽 번호로 색인할 수 있게 문서 전체 길이로 (범위 밖은 빈 쪽)
+        blank = Layout(0, 0, 0, 0, 0, 0, 0)
+        pages = [by_no.get(i) or PageInfo(i, blank, [], [], [], [], None, False) for i in range(n_doc)]
     return Analysis(path, pages, problem_pages, solution_pages, outline, notes)
 
 
@@ -1476,10 +1510,13 @@ def expected_numbers(jobs: List[Job]) -> Dict[str, List[int]]:
     return missing
 
 
-def build_jobs(path: str, exam: str, kind: str, pad_pt: float, split: bool) -> Tuple[Analysis, List[Job]]:
-    if kind not in ("문제", "해설"):          # [패치 14] 합본은 자르지 않는다
+def build_jobs(path: str, exam: str, kind: str, pad_pt: float, split: bool,
+               pages: Optional[range] = None) -> Tuple[Analysis, List[Job]]:
+    """한 파일(또는 그 쪽 범위 pages)을 문제 또는 해설로 분석해 jobs 를 만든다.
+    합본은 여기로 직접 넣지 않는다 — plan_file() 이 표지 쪽에서 나눠 두 번 부른다."""
+    if kind not in ("문제", "해설"):          # [패치 14] 크기 기반 합본 분석은 쓰지 않는다
         raise ValueError(f"{os.path.basename(path)}: {COMBINED_MSG}")
-    an = analyze(path, kind)
+    an = analyze(path, kind, pages)
     jobs: List[Job] = []
     if kind in ("문제", "합본"):
         jobs += plan_problems(an, exam, pad_pt)
@@ -1549,6 +1586,208 @@ def write_debug_pdf(path: str, jobs: List[Job], out_path: str):
     doc.close()
 
 
+# ------------------------------------------------- 패치 22: 입력 판정 -----
+COVER_RE = re.compile(r"정\s*답\s*및\s*해\s*설|해\s*설\s*지")            # 해설 표지 문구
+PROB_HEADER_RE = re.compile(r"문제지|제\s*\d\s*교시|홀수형|짝수형")          # 문제지 머릿말 (해설 구간에 있으면 다른 회차가 섞인 것)
+COVER_TOP = 0.20             # 쪽 위 이 비율 안의 줄만 본다
+COVER_SIZE_RATIO = 1.5       # 표지 글자 크기 ≥ 본문 크기 × 이 값 (실측: 표지 16~27pt, 본문 7~11pt)
+COVER_MIN_SIZE = 14.0        # 본문 크기를 모를 때(텍스트가 거의 없을 때)의 표지 크기 하한
+COVER_GAP = 2                # 표지 후보가 없는 쪽이 이만큼 이상 이어져야 다른 구간으로 센다
+TEXTLESS_HANGUL = 20         # 한 쪽의 한글 음절이 이보다 적으면 "텍스트 없는 쪽"
+TEXTLESS_PAGE_RATIO = 0.8    # 텍스트 없는 쪽이 이 비율 이상이면 표지를 읽을 수 없는 파일
+REJECT_MSG = {
+    "cannot_open": "PDF를 열 수 없습니다 (손상되었거나 암호가 걸려 있음).",
+    "text_less": "글자가 그림·윤곽선이라 표지(정답 및 해설)를 읽을 수 없습니다. "
+                 "문제지·해설지를 나눠 올려 주세요 (나눠 올리면 처리됩니다).",
+    "no_cover": "문제지와 해설지를 구분할 표지(정답 및 해설)를 찾지 못했습니다. "
+                "문제지와 해설지를 별개의 파일로 나누고 파일명에 각각 '문제', '해설'을 넣어 주세요.",
+    "name_conflict": "파일명은 문제지인데 1쪽이 해설 표지입니다. 파일명을 확인해 주세요.",
+    "bad_split_page": "--split-page 값이 쪽 범위를 벗어났습니다.",
+    "duplicate_input": "같은 시험지의 파일이 겹칩니다 (합본과 분리 파일이 함께 있거나 같은 종류가 둘 이상).",
+    "unpaired": "짝이 없는 세트입니다.",
+}
+
+
+def producer_hint(producer: str) -> Optional[str]:
+    """[P2] 번호를 하나도 못 찾았을 때만 붙이는 제작 도구 안내. Distiller·PScript(윤곽선 모드로 처리됨)는 제외."""
+    tool = ("macOS Quartz" if "Quartz PDFContext" in (producer or "")
+            else "Microsoft Print to PDF" if "Microsoft: Print To PDF" in (producer or "") else None)
+    if not tool:
+        return None
+    return (f"이 PDF는 {tool}(으)로 만들어져 글자가 그림·윤곽선으로 바뀌었을 수 있습니다. "
+            "한글에서 '파일 → PDF로 저장하기'(한컴 PDF)로 다시 저장해 주세요.")
+
+
+def inspect_pdf(path: str, split_page: Optional[int] = None) -> dict:
+    """파일명(classify_filename) + PDF 내용(해설 표지)으로 종류를 최종 판정한다. 예외를 던지지 않는다.
+
+    반환 dict: file, exam, name_kind('문제'|'해설'|'합본'), kind('문제'|'해설'|'합본'|None),
+      split_page(해설이 시작되는 쪽, **0부터**; 합본일 때만), status('ok'|'rejected'), reason(코드), message(사람용),
+      pages, producer, cover_pages(0부터), cover_segments, cover_size, body_size, text_less,
+      problem_header_pages, multi_exam_suspect, notes.
+    split_page 인자(1부터)를 주면 표지 판정 대신 그 쪽에서 나눈다 (1이면 전체가 해설).
+    """
+    exam, name_kind = classify_filename(path)
+    info = {"file": os.path.basename(path), "exam": exam, "name_kind": name_kind, "kind": None, "split_page": None,
+            "status": "ok", "reason": None, "message": None, "pages": 0, "producer": "",
+            "cover_pages": [], "cover_segments": 0, "cover_size": None, "body_size": 0.0, "text_less": False,
+            "problem_header_pages": [], "multi_exam_suspect": False, "notes": []}
+
+    def reject(code: str) -> dict:
+        info.update(status="rejected", reason=code, message=REJECT_MSG[code])
+        return info
+
+    sizes: Dict[float, int] = {}
+    cand: Dict[int, float] = {}
+    hangul: List[int] = []
+    hdr: List[int] = []
+    try:
+        doc = pymupdf.open(path)
+        try:
+            if doc.needs_pass or doc.page_count == 0:       # 암호화돼 있어도 열리면 진행한다
+                return reject("cannot_open")
+            n = doc.page_count
+            info.update(pages=n, producer=(doc.metadata or {}).get("producer") or "")
+            for pno in range(n):
+                page = doc[pno]
+                limit, nh, top_text = page.rect.height * COVER_TOP, 0, []
+                for b in page.get_text("dict")["blocks"]:
+                    for line in b.get("lines", []):
+                        spans = [sp for sp in line["spans"] if sp["text"].strip()]
+                        if not spans:
+                            continue
+                        text = "".join(sp["text"] for sp in spans)
+                        for sp in spans:                      # 본문 크기 = 문서 전체의 글자 수 가중 최빈 크기
+                            k = round(sp["size"], 1)
+                            sizes[k] = sizes.get(k, 0) + len(sp["text"].strip())
+                        nh += len(re.findall(r"[가-힣]", text))
+                        if line["bbox"][1] < limit:
+                            top_text.append(text)
+                            if COVER_RE.search(text):
+                                cand[pno] = max(cand.get(pno, 0.0), max(sp["size"] for sp in spans))
+                hangul.append(nh)
+                if pno not in cand and PROB_HEADER_RE.search(" ".join(top_text)):
+                    hdr.append(pno)
+        finally:
+            doc.close()
+    except Exception:  # noqa: BLE001
+        return reject("cannot_open")
+
+    body = max(sizes, key=sizes.get) if sizes else 0.0
+    need = body * COVER_SIZE_RATIO if body else COVER_MIN_SIZE
+    covers = sorted(pno for pno, sz in cand.items() if sz >= need)
+    segs, prev = 0, None
+    for pno in covers:
+        if prev is None or pno - prev - 1 >= COVER_GAP:
+            segs += 1
+        prev = pno
+    text_less = sum(1 for h in hangul if h < TEXTLESS_HANGUL) / n >= TEXTLESS_PAGE_RATIO
+    info.update(body_size=body, cover_pages=covers, cover_segments=segs, text_less=text_less,
+                cover_size=round(cand[covers[0]], 1) if covers else None)
+    k = covers[0] if covers else None
+
+    if split_page is not None:                                # 사람이 분할 쪽을 지정
+        if not 1 <= split_page <= n:
+            return reject("bad_split_page")
+        kind, k = ("해설", None) if split_page == 1 else ("합본", split_page - 1)
+        info["notes"].append(f"split_page_manual: {split_page}")
+    elif name_kind == "해설":                                  # 해설 파일명이면 표지 판정을 하지 않는다 (D5)
+        kind = "해설"
+        if covers and covers[0] >= 1:
+            info["notes"].append("maybe_combined")            # 합본을 해설 이름으로 올렸을 수 있다 (W2-10)
+    elif name_kind == "합본":
+        if text_less:
+            return reject("text_less")
+        if k is None:
+            return reject("no_cover")
+        kind = "해설" if k == 0 else "합본"
+    else:                                                     # 문제 파일명
+        if k is None:
+            kind = "문제"
+        elif k == 0:
+            return reject("name_conflict")
+        else:
+            try:                                              # 표지 뒤에 실제 해설 번호가 있어야 합본으로 나눈다 (W2-05)
+                has_sol = any(pg.sol_heads for pg in analyze(path, "해설", range(k, n)).pages)
+            except Exception:  # noqa: BLE001
+                has_sol = False
+            if has_sol:
+                kind = "합본"
+            else:
+                kind = "문제"
+                info["notes"].append(f"cover_ignored: p{k + 1}")
+    info["kind"] = kind
+    info["split_page"] = k if kind == "합본" else None
+    if kind in ("합본", "해설"):                               # 여러 회차가 한 파일에 섞였는가 (W2-01) — 거부하지 않는다
+        start = k if kind == "합본" else 0
+        bad = [pno for pno in hdr if pno >= start]
+        info["problem_header_pages"] = bad
+        if bad:
+            info["notes"].append(f"problem_pages_in_solution: {[pno + 1 for pno in bad]}")
+        if segs >= 2:
+            info["notes"].append(f"cover_segments: {segs}")
+        if bad or segs >= 2:
+            info["multi_exam_suspect"] = True
+            info["notes"].append("multi_exam_suspect")
+    return info
+
+
+def group_sets(paths: List[str], split_page: Optional[int] = None) -> List[dict]:
+    """파일별 inspect_pdf 결과를 시험지명으로 묶어 세트를 판정한다 (앱·러너 공용).
+    세트 dict: exam, files[inspect_pdf 결과 + path], status('ok'|'rejected'), reason, message, multi_exam_suspect."""
+    by_exam: Dict[str, List[dict]] = {}
+    for path in paths:
+        info = inspect_pdf(path, split_page)
+        info["path"] = path
+        by_exam.setdefault(info["exam"], []).append(info)
+    out = []
+    for exam, fs in by_exam.items():
+        st = {"exam": exam, "files": fs, "status": "ok", "reason": None, "message": None,
+              "multi_exam_suspect": any(f["multi_exam_suspect"] for f in fs)}
+        bad = [f for f in fs if f["status"] == "rejected"]
+        kinds = sorted(f["kind"] for f in fs if f["kind"])
+        if bad:
+            st.update(status="rejected", reason=bad[0]["reason"],
+                      message="; ".join(f"{f['file']}: {f['message']}" for f in bad))
+        elif kinds in (["합본"], ["문제", "해설"]):
+            pass
+        elif len(fs) > 1 and ("합본" in kinds or len(set(kinds)) < len(kinds)):
+            st.update(status="rejected", reason="duplicate_input", message=REJECT_MSG["duplicate_input"])
+        else:
+            msg = REJECT_MSG["unpaired"] + (" 해설만 있습니다. 합본이면 파일명에서 '해설' 표기를 빼고 다시 올려 주세요."
+                                            if kinds == ["해설"] else " 문제지만 있습니다.")
+            st.update(status="rejected", reason="unpaired", message=msg)
+        out.append(st)
+    return out
+
+
+def plan_file(path: str, exam: str, info: dict, pad_pt: float, split: bool
+              ) -> Tuple[List[Job], List[str], List[str], Optional[str]]:
+    """inspect_pdf 결과(info)대로 한 파일의 jobs 를 만든다 → (jobs, notes, 중복 키, 실패 사유 | None).
+    합본은 표지 쪽에서 나눠 문제 구간·해설 구간을 각각 독립 문서처럼 분석한다.
+    어느 구간이든 0문항이면 실패 사유 'zero_items' (그 파일은 자르지 않는다)."""
+    kind, n = info["kind"], info["pages"]
+    parts = ([("문제", range(0, info["split_page"])), ("해설", range(info["split_page"], n))]
+             if kind == "합본" else [(kind, None)])
+    jobs: List[Job] = []
+    notes: List[str] = list(info.get("notes") or [])
+    dups: List[str] = []
+    fail: Optional[str] = None
+    for side, rng in parts:
+        an, js = build_jobs(path, exam, side, pad_pt, split, rng)
+        notes += [f"{side}: {x}" for x in an.notes] if kind == "합본" else an.notes
+        dups += an.duplicate_keys
+        if not js:
+            fail = "zero_items"
+            notes.append(f"{side} 구간에서 문항을 찾지 못함" if kind == "합본" else "문항을 찾지 못함")
+        jobs += js
+    if fail:
+        hint = producer_hint(info.get("producer") or "")
+        if hint:
+            notes.append(hint)
+    return jobs, notes, dups, fail
+
+
 # ------------------------------------------------------- 결과 레코드 -----
 def job_key(job: Job) -> str:
     return f"{SUBJECT_CODES[job.subject]}{job.num:02d}"
@@ -1568,7 +1807,8 @@ def _side_record(jobs: List[Job], kind: str, plan: bool) -> Optional[dict]:
 
 def file_record(path: str, exam: str, input_kind: str, kind: Optional[str], status: str, reason: Optional[str],
                 jobs: Optional[List[Job]] = None, notes: Optional[List[str]] = None,
-                plan: bool = False, split_page: Optional[int] = None, dups: Optional[List[str]] = None) -> dict:
+                plan: bool = False, split_page: Optional[int] = None, dups: Optional[List[str]] = None,
+                suspect: bool = False) -> dict:
     """--json 의 file 레코드 (schema 1). 거부·실패 파일도 한 줄 남긴다."""
     if status == "ok" and dups:
         status = "partial"                      # [패치 18] 중복 키가 있으면 온전한 결과가 아니다
@@ -1582,7 +1822,7 @@ def file_record(path: str, exam: str, input_kind: str, kind: Optional[str], stat
                     status = "partial"
                 notes.append(f"{side} 틀 불일치 (가장 가까운 틀 {near}문항): "
                              + " / ".join([f"{k} 빠짐 {v}" for k, v in miss.items()] + [f"{k} 남음 {v}" for k, v in extra.items()]))
-    return {"duplicate_keys": list(dups or []),"schema": JSON_SCHEMA, "type": "file", "engine": engine_version(), "pymupdf": pymupdf.VersionBind,
+    return {"duplicate_keys": list(dups or []), "multi_exam_suspect": bool(suspect),"schema": JSON_SCHEMA, "type": "file", "engine": engine_version(), "pymupdf": pymupdf.VersionBind,
             "file": os.path.basename(path), "exam": exam, "input_kind": input_kind, "kind": kind,
             "split_page": split_page, "status": status, "reason": reason,
             "problem": _side_record(jobs or [], "문제", plan), "solution": _side_record(jobs or [], "해설", plan),
@@ -1613,6 +1853,8 @@ def set_record(exam: str, files: List[dict]) -> dict:
         if dups:
             reasons.append("duplicate_key")
             notes.append(f"duplicate_key({side}): {dups}")
+    if any(f.get("multi_exam_suspect") for f in files):      # [패치 22] 여러 회차가 한 파일에 섞인 것으로 보임
+        reasons.append("multi_exam_suspect")
     for f in files:                             # [패치 18] 파일 안에서 두 번 나와 버려진 키
         if f.get("duplicate_keys"):
             reasons.append("duplicate_key")
@@ -1639,7 +1881,10 @@ def main(argv=None):
     ap.add_argument("pdfs", nargs="*")
     ap.add_argument("--out", default="crops", help="출력 폴더 (기본: ./crops)")
     ap.add_argument("--exam", default=None, help="시험지명 (기본: 파일명에서 _문제/_해설(_문/_해) 을 뗀 이름)")
-    ap.add_argument("--kind", choices=["auto", "문제", "해설"], default="auto")   # [패치 14] 합본 없음
+    ap.add_argument("--kind", choices=["auto", "문제", "해설"], default="auto",
+                    help="auto(기본) = 파일명 + 표지로 판정. 문제/해설 = 그 종류로 강제")
+    ap.add_argument("--split-page", type=int, default=None, metavar="N",
+                    help="[패치 22] 합본의 해설 시작 쪽(1부터)을 직접 지정 — 표지 텍스트가 없는 합본용")
     ap.add_argument("--margin", type=float, default=3.0, help="본문 주변 여백(mm)")
     ap.add_argument("--dpi", type=int, default=600)
     ap.add_argument("--split", action="store_true", help="(패치 7 이후 기본 동작과 동일 — 호환용)")
@@ -1650,6 +1895,8 @@ def main(argv=None):
                     help="[패치 16] 파일·세트 결과를 JSON Lines 로 기록 (--plan-only 에서 생략하면 표준 출력)")
     ap.add_argument("--plan-only", action="store_true",
                     help="[패치 16] 자르지 않고 계획(문항 키·조각 영역)만 레코드로 낸다")
+    ap.add_argument("--inspect", action="store_true",
+                    help="[패치 22] 자르지 않고 파일·세트 판정(group_sets)만 JSON 으로 출력")
     ap.add_argument("--version", action="store_true", help="엔진 버전만 출력")
     args = ap.parse_args(argv)
     if args.version:
@@ -1657,6 +1904,9 @@ def main(argv=None):
         return
     if not args.pdfs:
         ap.error("PDF 파일을 하나 이상 주세요")
+    if args.inspect:
+        print(json.dumps(group_sets(args.pdfs, args.split_page), ensure_ascii=False))
+        return
     want_pdf = args.pdf or args.pdf_only
     want_png = not args.pdf_only
     quiet = args.plan_only and not args.json          # 계획을 표준 출력으로 낼 때는 사람용 줄을 숨긴다
@@ -1666,46 +1916,54 @@ def main(argv=None):
     total = 0
     records: List[dict] = []
     by_exam: Dict[str, List[dict]] = {}
+
+    def keep(exam: str, rec: dict):
+        records.append(rec)
+        by_exam.setdefault(exam, []).append(rec)
+
     for path in args.pdfs:
-        exam, input_kind = classify_filename(path)
-        exam = args.exam or exam
-        kind = input_kind if args.kind == "auto" else args.kind
-        if kind not in ("문제", "해설"):
-            # [패치 14→16] 합본은 자르지 않는다. 멈추지 않고 rejected 레코드로 남긴 뒤 다음 파일로 간다.
-            say(f"[{os.path.basename(path)}] 거부: {COMBINED_MSG}")
-            rec = file_record(path, exam, input_kind, None, "rejected", "combined_not_supported",
-                              notes=[COMBINED_MSG])
-            records.append(rec); by_exam.setdefault(exam, []).append(rec)
+        name = os.path.basename(path)
+        info = inspect_pdf(path, args.split_page)
+        if args.kind != "auto" and info["reason"] != "cannot_open":     # 종류 강제: 표지 판정을 쓰지 않는다
+            info.update(kind=args.kind, split_page=None, status="ok", reason=None, message=None)
+        exam, input_kind = args.exam or info["exam"], info["name_kind"]
+        if info["status"] == "rejected":
+            say(f"[{name}] 거부({info['reason']}): {info['message']}")
+            keep(exam, file_record(path, exam, input_kind, None, "rejected", info["reason"],
+                                   notes=[info["message"]] + info["notes"]))
             continue
+        kind = info["kind"]
         try:
-            an, jobs = build_jobs(path, exam, kind, args.margin * MM, args.split)
+            jobs, notes, dups, fail = plan_file(path, exam, info, args.margin * MM, args.split)
         except Exception as e:  # noqa: BLE001 — [패치 18] 한 파일의 실패가 나머지를 막지 않게
-            say(f"[{os.path.basename(path)}] 실패: {type(e).__name__}: {e}")
-            why = str(e).replace(path, os.path.basename(path))          # 사유에 절대 경로를 남기지 않는다
-            rec = file_record(path, exam, input_kind, kind, "failed", f"exception: {type(e).__name__}: {why}"[:300])
-            records.append(rec); by_exam.setdefault(exam, []).append(rec)
+            why = str(e).replace(path, name)                  # 사유에 절대 경로를 남기지 않는다
+            say(f"[{name}] 실패: {type(e).__name__}: {why}")
+            keep(exam, file_record(path, exam, input_kind, kind, "failed", f"exception: {type(e).__name__}: {why}"[:300],
+                                   split_page=info["split_page"]))
             continue
-        say(f"[{os.path.basename(path)}] 시험지명={exam} 종류={kind} "
-            f"문제페이지={len(an.problem_pages)} 해설페이지={len(an.solution_pages)} 문항={len(jobs)}")
-        for note in an.notes:
+        n_p = sum(1 for j in jobs if j.kind == "문제")
+        n_s = sum(1 for j in jobs if j.kind == "해설")
+        where = f" (표지 {info['split_page'] + 1}쪽에서 분할)" if kind == "합본" else ""
+        say(f"[{name}] 시험지명={exam} 종류={kind}{where} 문제={n_p} 해설={n_s} 문항={len(jobs)}")
+        for note in notes:
             say(f"  * {note}")
         for subj, miss in expected_numbers(jobs).items():
             say(f"  ! {subj} 누락 번호: {miss}")
-        status, reason = ("failed", "zero_items") if not jobs else ("ok", None)
-        rec = file_record(path, exam, input_kind, kind, status, reason, jobs, an.notes, plan=args.plan_only,
-                          dups=an.duplicate_keys)
-        records.append(rec); by_exam.setdefault(exam, []).append(rec)
-        if args.plan_only:
+        rec = file_record(path, exam, input_kind, kind, "failed" if fail else "ok", fail, jobs, notes,
+                          plan=args.plan_only, split_page=info["split_page"], dups=dups,
+                          suspect=info["multi_exam_suspect"])
+        keep(exam, rec)
+        if args.plan_only or fail:                            # 실패한 파일은 자르지 않는다 (반쪽 결과를 남기지 않게)
             continue
 
-        def prog(i, n, name):
-            if name:
-                say(f"  {i + 1:>3}/{n}  {name}")
+        def prog(i, n, base):
+            if base:
+                say(f"  {i + 1:>3}/{n}  {base}")
 
         try:
             written = run_jobs(path, jobs, args.dpi, args.out, prog, png=want_png, pdf=want_pdf)
         except Exception as e:  # noqa: BLE001 — [패치 18]
-            say(f"[{os.path.basename(path)}] 자르기 실패: {type(e).__name__}: {e}")
+            say(f"[{name}] 자르기 실패: {type(e).__name__}: {e}")
             rec.update(status="failed", reason=f"exception: {type(e).__name__}: {e}"[:300])
             continue
         total += len(written)
