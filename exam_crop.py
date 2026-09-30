@@ -1396,7 +1396,7 @@ def exit_code(records: List[dict]) -> int:
 # --------------------------------------------------------------- CLI -----
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("pdfs", nargs="+")
+    ap.add_argument("pdfs", nargs="*")
     ap.add_argument("--out", default="crops", help="출력 폴더 (기본: ./crops)")
     ap.add_argument("--exam", default=None, help="시험지명 (기본: 파일명에서 _문제/_해설(_문/_해) 을 뗀 이름)")
     ap.add_argument("--kind", choices=["auto", "문제", "해설"], default="auto")   # [패치 14] 합본 없음
@@ -1415,6 +1415,8 @@ def main(argv=None):
     if args.version:
         print(engine_version())
         return
+    if not args.pdfs:
+        ap.error("PDF 파일을 하나 이상 주세요")
     want_pdf = args.pdf or args.pdf_only
     want_png = not args.pdf_only
     quiet = args.plan_only and not args.json          # 계획을 표준 출력으로 낼 때는 사람용 줄을 숨긴다

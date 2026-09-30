@@ -10,8 +10,8 @@
 ## 푸시 전 필수 검사 (2026-09-30, 보완 계획 v5)
 
 1. `python3 -m py_compile exam_crop.py exam_crop_app.py`
-2. `~/audit_runner/venv/bin/python -m runner.corpus_check --engine <커밋 SHA 또는 작업 트리 경로>` — 코퍼스 전체의 `--plan-only` 계획이 기대값과 같아야 한다. 의도한 차이는 커밋 메시지에 파일·키 단위로 적는다.
-   (corpus_check 가 아직 없으면 `~/audit_runner` 의 `engine.smoke_test` 로 대신한다.)
+2. `(cd ~/audit_runner && venv/bin/python -m runner.corpus_check --engine <커밋 SHA 또는 ~/CLUE/repos/CroP>)` — 코퍼스 전체의 `--plan-only` 계획이 기대값과 같아야 한다(❌ 0건). 의도한 차이는 커밋 메시지에 파일·키 단위로 적고, 기대값은 `--accept <세트>` 로 그 세트만 갱신한다.
+   러너도 새 커밋을 받으면 같은 검사를 하고, 다르면 그 엔진을 쓰지 않는다.
 3. **엔진은 `exam_crop.py` 한 파일**이어야 한다. 러너는 커밋에서 이 파일만 꺼낸다. 다른 모듈 import 금지(표준 라이브러리·pymupdf·PIL 제외). `CAPABILITIES` 에는 완성된 기능만 넣는다.
 4. 동작이 바뀌면 `ENGINE_VERSION` 을 올린다.
 
