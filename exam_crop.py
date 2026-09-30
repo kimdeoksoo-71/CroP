@@ -125,6 +125,16 @@ CLI
     2) 그래도 0개면 기준을 '본문 크기(글자 수 가중 최빈) × 1.1'로 낮춰 `N.` 번호를 다시 찾는다.
   번호를 이미 찾는 파일은 그대로다 (26K28 문제·해설 46문항 자르는 영역 동일 확인).
 
+[패치 21 · 2026-09-30 — 순서로 매기는 번호에 틀 적용]  (보완 계획 v5 2-4, P10)
+  이미지 글자 모드는 번호를 읽지 못해 "1~22, 이후 23~30 반복" 순서로 매겼다. 12문항 세트는 9번이 01번으로
+  저장됐고, 문제·해설이 똑같이 틀리면 쌍 대조도 통과했다.
+    1) 번호 이미지 개수로 틀을 고른다 (12 → 9~14·20·21·28·29·28·29, 38, 46). 그 순서대로 번호를 매긴다.
+    2) 개수가 어느 틀과도 맞지 않으면 번호를 매기지 않는다 (0문항 = failed). 추측하지 않는다.
+    3) 해설 번호 이미지는 문제 번호보다 크다 (써킷 1회 MS Print판: 문제 18.4pt, 해설 28.6pt).
+       해설 파일에는 해설용 크기 범위를 쓰고, 본문 낱말 이미지의 1.5배 이상이면서 높이가 서로 같은 무리만 번호로 본다.
+    4) 외곽선 모드: 한 자리 번호가 9개 미만이라 1~9 학습을 못 하면(12문항), 개수로 틀을 골라 그 순서대로
+       숫자 모양을 학습한다. 같은 숫자는 같은 모양, 다른 숫자는 다른 모양이어야 통과. 아니면 종전처럼 0문항.
+
 [패치 20 · 2026-09-30 — 문항 틀]  (보완 계획 v5 2-3, P3)
   올해 시험지 구성은 세 가지다: 46문항(공통 1~22 + 선택 3과목 23~30), 38문항(공통 + 선택 2과목),
   12문항(공통 9~14·20·21 + 선택 2과목 28·29). TEMPLATES 한 곳에 표로 둔다 (30문항 틀은 추후 추가).
@@ -189,7 +199,7 @@ import pymupdf  # PyMuPDF
 from PIL import Image
 
 # ------------------------------------------------------------ 엔진 식별 -----
-ENGINE_VERSION = "P20"                     # 패치 번호. 동작이 바뀌는 커밋마다 올린다
+ENGINE_VERSION = "P21"                     # 패치 번호. 동작이 바뀌는 커밋마다 올린다
 CAPABILITIES = frozenset({"json", "plan_only"})   # 러너는 이 집합만 보고 새 경로를 쓴다 (완성된 기능만 넣는다)
 JSON_SCHEMA = 1                            # --json 레코드 형식 번호. 필드를 빼거나 뜻을 바꾸면 올린다
 MIRROR_DIR = os.path.expanduser("~/audit_runner/crop_mirror")   # 맥미니 러너 전용 복사본 (여기서 뜨는 앱 = 러너 엔진)
@@ -688,6 +698,9 @@ def _outline_decode(tokens: List[dict], label: str, notes: List[str]) -> List[di
     singles = [t for t in tokens if len(t["digits"]) == 1]
     doubles = [t for t in tokens if len(t["digits"]) == 2]
     if len(singles) < 9 or not doubles:
+        by_tpl = _outline_decode_by_template(tokens, label, notes)     # [패치 21] 12문항 등
+        if by_tpl:
+            return by_tpl
         notes.append(f"{label}: 한 자리 번호 {len(singles)}개·두 자리 {len(doubles)}개 — "
                      f"1~9 학습에 부족해 번호를 판독하지 못함")
         return []
@@ -722,6 +735,36 @@ def _outline_decode(tokens: List[dict], label: str, notes: List[str]) -> List[di
         t["num"] = num
         out.append(t)
     return out
+
+
+def _outline_decode_by_template(tokens: List[dict], label: str, notes: List[str]) -> List[dict]:
+    """[패치 21] 1~9 가 다 나오지 않는 구성(12문항)용. 토큰 개수로 틀을 골라 그 번호 순서대로 숫자 모양을 학습한다.
+    자릿수가 틀과 맞고, 같은 숫자는 같은 모양·다른 숫자는 다른 모양일 때만 번호를 매긴다. 아니면 []."""
+    name = next((k for k in TEMPLATES if len(template_sequence(k)) == len(tokens)), None)
+    if name is None:
+        return []
+    seq = template_sequence(name)
+    shapes: Dict[str, list] = {}
+    for t, num in zip(tokens, seq):
+        ds = str(num)
+        if len(ds) != len(t["digits"]):
+            return []
+        for ch, g in zip(ds, t["digits"]):
+            pts = _outline_pts(g)
+            if ch in shapes:
+                if not _outline_same(pts, shapes[ch]):
+                    return []
+            else:
+                shapes[ch] = pts
+    chars = list(shapes)
+    for i, a in enumerate(chars):
+        for b in chars[i + 1:]:
+            if _outline_same(shapes[a], shapes[b]):
+                return []
+    for t, num in zip(tokens, seq):
+        t["num"] = num
+    notes.append(f"{label}: 번호 {len(tokens)}개 — {name}문항 틀 순서로 숫자 모양을 학습해 판독 (일관성 검사 통과)")
+    return tokens
 
 
 def _outline_pass(pages: List[PageInfo], per_page: List[tuple], kind: str) -> List[str]:
@@ -769,23 +812,30 @@ def _outline_pass(pages: List[PageInfo], per_page: List[tuple], kind: str) -> Li
 # ------------------------------------- 패치 11: 이미지 글자 PDF 감지 -----
 IMGTXT_TOKEN_W = (9.0, 36.0)     # 번호 이미지("N.") 폭 범위(pt) — 한 자리 ≈14, 두 자리 ≈19. [패치 17] 상한 26→36
 IMGTXT_TOKEN_H = (9.0, 20.0)     # 번호 이미지 높이 범위(pt) — 문제 ≈12.6
+IMGTXT_SOL_TOKEN_W = (9.0, 60.0)  # [패치 21] 해설 번호 이미지 폭 (써킷 1회 MS Print: 한 자리 37, 두 자리 52)
+IMGTXT_SOL_TOKEN_H = (9.0, 34.0)  # [패치 21] 해설 번호 이미지 높이 (≈28.6)
+IMGTXT_SOL_LEFT_TOL = 24.0       # [패치 21] 해설 번호의 단 왼쪽 허용 오프셋 (오른쪽 단에서 15.2pt — 문제용 15.0을 넘음)
+IMGTXT_SOL_HEAD_RATIO = 1.5      # [패치 21] 해설 번호 이미지 높이 ÷ 본문 낱말 이미지 높이 하한 (28.6/14.4 ≈ 2.0)
 IMGTXT_LEFT_TOL = 15.0           # 단 왼쪽 가장자리에서 허용 오프셋(pt)
 IMGTXT_MIN_IMAGES = 12           # 쪽당 이미지 수가 이 이상이면 '글자가 이미지인 PDF' 로 본다
 IMGTXT_HEAD_RATIO = 1.08         # 번호 이미지 높이 ÷ 본문 낱말 이미지 높이(중앙값) 하한 — 13pt/11pt ≈ 1.15
 
 
-def _imgtxt_tokens(pno: int, layout: Layout, items: List[Item]) -> List[dict]:
-    """단 왼쪽 가장자리에 붙은 작은 이미지(문항 번호 'N.' 이미지) 후보를 찾는다."""
+def _imgtxt_tokens(pno: int, layout: Layout, items: List[Item], kind: str = "문제") -> List[dict]:
+    """단 왼쪽 가장자리에 붙은 작은 이미지(문항 번호 'N.' 이미지) 후보를 찾는다.
+    [패치 21] kind='해설' 이면 해설 번호용(더 큰) 크기 범위를 쓴다."""
+    lim_w, lim_h = (IMGTXT_SOL_TOKEN_W, IMGTXT_SOL_TOKEN_H) if kind == "해설" else (IMGTXT_TOKEN_W, IMGTXT_TOKEN_H)
+    left_tol = IMGTXT_SOL_LEFT_TOL if kind == "해설" else IMGTXT_LEFT_TOL
     out = []
     for it in items:
         if it.kind != "image":
             continue
         r = it.rect
-        if not (IMGTXT_TOKEN_W[0] < r.width < IMGTXT_TOKEN_W[1] and IMGTXT_TOKEN_H[0] < r.height < IMGTXT_TOKEN_H[1]):
+        if not (lim_w[0] < r.width < lim_w[1] and lim_h[0] < r.height < lim_h[1]):
             continue
         col = layout.col_of(r)
         x0, _ = layout.col_bounds(col)
-        if r.x0 - x0 > IMGTXT_LEFT_TOL or r.x0 < x0 - 6:
+        if r.x0 - x0 > left_tol or r.x0 < x0 - 6:
             continue
         if not (layout.top < (r.y0 + r.y1) / 2 < layout.bottom):
             continue
@@ -867,14 +917,20 @@ def _imgtxt_number(tokens: List[dict], label: str, notes: List[str]) -> List[dic
     n = len(tokens)
     if n == 0:
         return []
-    for i, t in enumerate(tokens):
-        t["num"] = i + 1 if i < 22 else 23 + (i - 22) % 8
-    if n < 22 or (n - 22) % 8 != 0:
-        notes.append(f"{label}: 번호 이미지 {n}개 — 22+8k 가 아니어서 번호가 어긋났을 수 있음 (누락·오탐 확인)")
-    single = [t["w"] for t in tokens[:9]]
-    double = [t["w"] for t in tokens[9:]]
+    # [패치 21] 개수로 틀을 고른다. 맞는 틀이 없으면 번호를 매기지 않는다 (추측 금지 → 0문항 = failed)
+    name = next((k for k in TEMPLATES if len(template_sequence(k)) == n), None)
+    if name is None:
+        notes.append(f"{label}: 번호 이미지 {n}개 — 알려진 틀({'/'.join(TEMPLATES)}문항)과 맞지 않아 번호를 매기지 않음 "
+                     f"(누락·오탐 확인)")
+        return []
+    for t, num in zip(tokens, template_sequence(name)):
+        t["num"] = num
+    single = [t["w"] for t in tokens if t["num"] < 10]
+    double = [t["w"] for t in tokens if t["num"] >= 10]
     if single and double and not (max(single) < min(double) * 0.9):
         notes.append(f"{label}: 한 자리/두 자리 번호 이미지 폭이 구분되지 않음 — 순서 배정이 틀렸을 수 있음")
+    if name != "38" and name != "46":
+        notes.append(f"{label}: 번호 이미지 {n}개 → {name}문항 틀 순서로 번호 배정")
     return tokens
 
 
@@ -883,13 +939,22 @@ def _imgtxt_pass(pages: List[PageInfo], kind: str) -> List[str]:
     notes: List[str] = ["이미지 글자 PDF 감지 모드 (본문·번호가 텍스트가 아닌 이미지 — 번호는 읽기 순서로 배정)"]
     tokens: List[dict] = []
     for p in pages:
-        tokens += _imgtxt_tokens(p.no, p.layout, p.items)
+        tokens += _imgtxt_tokens(p.no, p.layout, p.items, kind)
     tokens.sort(key=lambda t: (t["page"], t["col"], t["y0"]))
     # 본문 낱말 이미지(≈11pt)와 번호 이미지(≈13pt)를 높이로 가른다: 전체 이미지 높이의 중앙값이 본문 크기
     body_h = sorted(it.rect.height for p in pages for it in p.items if it.kind == "image")
     if body_h:
         med = body_h[len(body_h) // 2]
-        tokens = [t for t in tokens if t["h"] >= IMGTXT_HEAD_RATIO * med]
+        if kind == "해설":
+            # [패치 21] 해설 번호는 본문보다 훨씬 크고 높이가 서로 같다 → 큰 것들 중 가장 흔한 높이의 무리만
+            big = [t for t in tokens if t["h"] >= IMGTXT_SOL_HEAD_RATIO * med]
+            if big:
+                hs = sorted(t["h"] for t in big)
+                ref = max(set(round(h, 1) for h in hs), key=lambda v: sum(1 for h in hs if abs(h - v) <= 0.05 * v))
+                big = [t for t in big if abs(t["h"] - ref) <= 0.08 * ref]
+            tokens = big
+        else:
+            tokens = [t for t in tokens if t["h"] >= IMGTXT_HEAD_RATIO * med]
     if not tokens:
         notes.append("번호 이미지 후보를 찾지 못함 — 양식이 다르거나 스캔(통이미지) PDF")
         return notes
