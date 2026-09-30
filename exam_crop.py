@@ -125,6 +125,17 @@ CLI
     2) 그래도 0개면 기준을 '본문 크기(글자 수 가중 최빈) × 1.1'로 낮춰 `N.` 번호를 다시 찾는다.
   번호를 이미 찾는 파일은 그대로다 (26K28 문제·해설 46문항 자르는 영역 동일 확인).
 
+[패치 17 · 2026-09-30 — 번호만 이미지인 PDF (패치 12.1 복원, 보완 계획 v5 0-3 P5)]
+  본문은 텍스트인데 문항 번호만 이미지로 들어간 문제지가 있다 (SOLN.26FS02 MS Print 원판: 번호 글꼴이
+  PDF 프린터에서 그림으로 바뀜). 쪽당 이미지 수가 적어 패치 11(이미지 글자 모드)의 진입 조건에 못 미치고,
+  두 자리 번호 이미지 폭(≈27~34pt)이 상한 26pt를 넘어 번호를 9개만 찾았다.
+    1) IMGTXT_TOKEN_W 상한 26 → 36.
+    2) 보조 경로: 외곽선 모드가 아니고, 해설 파일이 아니고, 문제 번호를 하나도 못 찾았으면
+       (쪽당 이미지 수와 상관없이) 해설 번호가 처음 나오는 쪽 앞의 쪽들에서 이미지 번호를 찾는다.
+       번호를 찾았을 때만 채택하고 notes 에 남긴다.
+  순서: 텍스트 번호 → 작은 조판(패치 15) → 번호만 이미지(이 패치). 앞 단계에서 찾으면 뒤는 돌지 않는다.
+  ※ 12.1 원본(9/27 웹 Claude 채팅판)은 찾지 못해 계획서 설명대로 다시 구현했다.
+
 [패치 16 · 2026-09-30 — 엔진 버전·기능 목록·결과 JSON·계획 출력]  (보완 계획 v5 0-4·0-5)
   - ENGINE_VERSION / CAPABILITIES / engine_version(): 러너·앱·corpus_check 가 엔진을 식별한다.
     SHA 는 (1) 같은 폴더의 _build_info.py(러너가 꺼낼 때 씀, import 가 아니라 파일로 읽음)
@@ -154,7 +165,7 @@ import pymupdf  # PyMuPDF
 from PIL import Image
 
 # ------------------------------------------------------------ 엔진 식별 -----
-ENGINE_VERSION = "P16"                     # 패치 번호. 동작이 바뀌는 커밋마다 올린다
+ENGINE_VERSION = "P17"                     # 패치 번호. 동작이 바뀌는 커밋마다 올린다
 CAPABILITIES = frozenset({"json", "plan_only"})   # 러너는 이 집합만 보고 새 경로를 쓴다 (완성된 기능만 넣는다)
 JSON_SCHEMA = 1                            # --json 레코드 형식 번호. 필드를 빼거나 뜻을 바꾸면 올린다
 MIRROR_DIR = os.path.expanduser("~/audit_runner/crop_mirror")   # 맥미니 러너 전용 복사본 (여기서 뜨는 앱 = 러너 엔진)
@@ -682,7 +693,7 @@ def _outline_pass(pages: List[PageInfo], per_page: List[tuple], kind: str) -> Li
 
 
 # ------------------------------------- 패치 11: 이미지 글자 PDF 감지 -----
-IMGTXT_TOKEN_W = (9.0, 26.0)     # 번호 이미지("N.") 폭 범위(pt) — 한 자리 ≈14, 두 자리 ≈19
+IMGTXT_TOKEN_W = (9.0, 36.0)     # 번호 이미지("N.") 폭 범위(pt) — 한 자리 ≈14, 두 자리 ≈19. [패치 17] 상한 26→36
 IMGTXT_TOKEN_H = (9.0, 20.0)     # 번호 이미지 높이 범위(pt) — 문제 ≈12.6
 IMGTXT_LEFT_TOL = 15.0           # 단 왼쪽 가장자리에서 허용 오프셋(pt)
 IMGTXT_MIN_IMAGES = 12           # 쪽당 이미지 수가 이 이상이면 '글자가 이미지인 PDF' 로 본다
@@ -935,6 +946,17 @@ def analyze(path: str, kind: str = "합본") -> Analysis:
 
     if not outline and kind in ("문제", "해설"):
         notes += _small_type_pass(pages, kind)            # [패치 15]
+    if not outline and kind != "해설" and not any(p.prob_heads for p in pages) \
+            and not (kind == "문제" and any(p.sol_heads for p in pages)):
+        # [패치 17] 번호만 이미지인 PDF: 문제 번호를 하나도 못 찾았으면 쪽당 이미지 수와 상관없이
+        # 해설 번호가 처음 나오는 쪽 앞의 쪽들에서 이미지 번호를 찾는다. 찾았을 때만 채택한다.
+        # (kind='문제'에서 해설 크기 번호가 있으면 아래에서 문제 번호로 쓰이므로 여기 오지 않는다.)
+        first_sol = min((p.no for p in pages if p.sol_heads), default=len(pages))
+        front = [p for p in pages if p.no < first_sol]
+        if front:
+            img_notes = _imgtxt_pass(front, "문제")
+            if any(p.prob_heads for p in front):
+                notes += ["번호만 이미지인 PDF — 쪽당 이미지 수와 상관없이 이미지 번호를 사용"] + img_notes[1:]
 
     n_sol_raw = sum(len(p.sol_heads) for p in pages)      # 진단용 (병합 전 해설 크기 번호 수)
     if kind == "문제":
