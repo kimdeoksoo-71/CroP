@@ -651,6 +651,8 @@ class App(tk.Tk):
         want_png, want_pdf = bool(cfg.get("out_png", True)), bool(cfg.get("out_pdf", False))
         try:
             plans, total = [], 0
+            keys_of: Dict[ExamSet, Dict[str, List[str]]] = {}   # [패치 20] 세트별 문제/해설 키 (쌍 대조용, 건너뛰기 전 전체)
+            dups_of: Dict[ExamSet, List[str]] = {}              # [패치 20] 세트별 중복 번호
             for s in list(self.sets.values()):
                 self.q.put(("status", s, "분석 중"))
                 for path, kind in s.files():
@@ -669,6 +671,9 @@ class App(tk.Tk):
                         self.q.put(("log", f"[{os.path.basename(path)}] {note}"))
                     if not jobs:
                         self.q.put(("log", f"[{os.path.basename(path)}] 문항을 찾지 못했습니다 (텍스트 PDF가 아니거나 양식이 다름)"))
+                    for j in jobs:
+                        keys_of.setdefault(s, {}).setdefault(j.kind, []).append(core.job_key(j))
+                    dups_of.setdefault(s, []).extend(getattr(an, "duplicate_keys", []))
                     if not cfg["overwrite"]:
                         before = len(jobs)
                         # 이 문항이 만들 파일(PNG/PDF)이 전부 이미 있을 때만 건너뜀
@@ -699,8 +704,15 @@ class App(tk.Tk):
                         ds = base_s + sum(1 for j in jobs[:i] if j.kind == "해설")
                         self.q.put(("progress", base_done + i, name, dp, ds))
 
-                written = core.run_jobs(path, jobs, cfg["dpi"], out_dir, prog, lambda: self.stop_flag,
-                                        png=want_png, pdf=want_pdf)
+                try:
+                    written = core.run_jobs(path, jobs, cfg["dpi"], out_dir, prog, lambda: self.stop_flag,
+                                            png=want_png, pdf=want_pdf)
+                except Exception as e:  # noqa: BLE001 — [패치 20] 한 파일의 실패가 나머지 세트를 막지 않게
+                    self.q.put(("log", f"[{s.name}] {os.path.basename(path)} 자르기 실패: {e}"))
+                    self.q.put(("summary", s, f"실패: {e}", []))
+                    done += len(jobs)
+                    self.q.put(("progress", done, "", done_p, done_s))
+                    continue
                 done += len(jobs)
                 done_p += sum(1 for j in jobs if j.kind == "문제")
                 done_s += sum(1 for j in jobs if j.kind == "해설")
@@ -717,8 +729,18 @@ class App(tk.Tk):
                     if kj:
                         for subj, miss in core.expected_numbers(kj).items():
                             warnings.append(f"{k} {subj}: {', '.join(f'{n}번' for n in miss)}")
+                # [패치 20] 러너가 세트를 제외하는 사유를 앱에서도 바로 보이게: 쌍 불일치, 중복 번호
+                ks = keys_of.get(s, {})
+                if ks.get("문제") and ks.get("해설") and set(ks["문제"]) != set(ks["해설"]):
+                    only_p = sorted(set(ks["문제"]) - set(ks["해설"]))
+                    only_s = sorted(set(ks["해설"]) - set(ks["문제"]))
+                    warnings.append("문제·해설 번호 불일치"
+                                    + (f" 문제에만 {' '.join(only_p[:6])}" if only_p else "")
+                                    + (f" 해설에만 {' '.join(only_s[:6])}" if only_s else ""))
+                if dups_of.get(s):
+                    warnings.append(f"중복 번호 {' '.join(dups_of[s][:6])}")
                 self.q.put(("summary", s, " / ".join(parts), warnings))
-                warn = ("  ⚠ 누락: " + " / ".join(warnings)) if warnings else ""
+                warn = ("  ⚠ " + " / ".join(warnings)) if warnings else ""
                 self.q.put(("log", f"[{s.name}] {os.path.basename(path)} → {len(written)}개 저장{warn}"))
             self.q.put(("done", None))
         except Exception as e:  # noqa: BLE001
