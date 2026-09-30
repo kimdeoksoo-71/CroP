@@ -125,6 +125,14 @@ CLI
     2) 그래도 0개면 기준을 '본문 크기(글자 수 가중 최빈) × 1.1'로 낮춰 `N.` 번호를 다시 찾는다.
   번호를 이미 찾는 파일은 그대로다 (26K28 문제·해설 46문항 자르는 영역 동일 확인).
 
+[패치 20 · 2026-09-30 — 문항 틀]  (보완 계획 v5 2-3, P3)
+  올해 시험지 구성은 세 가지다: 46문항(공통 1~22 + 선택 3과목 23~30), 38문항(공통 + 선택 2과목),
+  12문항(공통 9~14·20·21 + 선택 2과목 28·29). TEMPLATES 한 곳에 표로 둔다 (30문항 틀은 추후 추가).
+  - 과목별 번호 집합이 어떤 틀과 정확히 맞으면 그 틀로 확정하고 누락 경고를 내지 않는다
+    (종전에는 12문항 세트마다 "공통 누락 1~8, 15~19, 22 …" 가 나왔다).
+  - 맞는 틀이 없으면 가장 가까운 틀 기준으로 빠진·남는 번호를 notes 에 남기고 status=partial (세트 제외 사유는 아님).
+  - file 레코드의 problem/solution.template 에 틀 이름.
+
 [패치 19 · 2026-09-30 — 위쪽 여백 제한]  (보완 계획 v5 1-4, P6)
   본문 상자의 위쪽이 머릿말 선(layout.top)보다 위에 있으면 선까지만 본문으로 보고 여백을 두른다.
   머릿말 선 위는 렌더링 뒤 흰색으로 지우던 영역이라 내용은 같고, 남던 빈 여백만 없어진다.
@@ -181,7 +189,7 @@ import pymupdf  # PyMuPDF
 from PIL import Image
 
 # ------------------------------------------------------------ 엔진 식별 -----
-ENGINE_VERSION = "P19"                     # 패치 번호. 동작이 바뀌는 커밋마다 올린다
+ENGINE_VERSION = "P20"                     # 패치 번호. 동작이 바뀌는 커밋마다 올린다
 CAPABILITIES = frozenset({"json", "plan_only"})   # 러너는 이 집합만 보고 새 경로를 쓴다 (완성된 기능만 넣는다)
 JSON_SCHEMA = 1                            # --json 레코드 형식 번호. 필드를 빼거나 뜻을 바꾸면 올린다
 MIRROR_DIR = os.path.expanduser("~/audit_runner/crop_mirror")   # 맥미니 러너 전용 복사본 (여기서 뜨는 앱 = 러너 엔진)
@@ -227,6 +235,53 @@ def is_dev_checkout() -> bool:
     """개발 clone 에서 실행 중인가 — git 작업 트리이면서 러너 미러(MIRROR_DIR)가 아닐 때."""
     here = os.path.realpath(os.path.dirname(os.path.abspath(__file__)))
     return engine_git_state()["source"] == "git" and here != os.path.realpath(MIRROR_DIR)
+
+
+# ---------------------------------------------------------------- 문항 틀 -----
+# [패치 20] 틀을 추가하려면 여기 한 줄만 넣는다.  "선택": (번호들, 선택과목 수)
+TEMPLATES = {
+    "46": {"공통": range(1, 23), "선택": (range(23, 31), 3)},
+    "38": {"공통": range(1, 23), "선택": (range(23, 31), 2)},
+    "12": {"공통": [9, 10, 11, 12, 13, 14, 20, 21], "선택": ([28, 29], 2)},
+    # "30": 2028학년도 — 추후
+}
+
+
+def template_sequence(name: str) -> List[int]:
+    """틀의 번호를 읽기 순서로: 공통 → 선택과목마다 선택 번호 반복."""
+    t = TEMPLATES[name]
+    sel, k = t["선택"]
+    return list(t["공통"]) + list(sel) * k
+
+
+def match_template(jobs: List["Job"]) -> Tuple[Optional[str], Optional[str], Dict[str, List[int]], Dict[str, List[int]]]:
+    """한 종류(문제 또는 해설)의 jobs → (정확히 맞는 틀 | None, 가장 가까운 틀, 빠진 번호, 남는 번호).
+    빠진·남는 번호는 {과목: [번호…]} (가장 가까운 틀 기준)."""
+    by: Dict[str, set] = {}
+    for j in jobs:
+        by.setdefault(j.subject, set()).add(j.num)
+    if not by:
+        return None, None, {}, {}
+    sels = [x for x in DEFAULT_ORDER if x in by]
+    best = None
+    for name, t in TEMPLATES.items():
+        common, (sel, k) = set(t["공통"]), (set(t["선택"][0]), t["선택"][1])
+        miss: Dict[str, List[int]] = {}
+        extra: Dict[str, List[int]] = {}
+        for subj, want in [("공통", common)] + [(x, sel) for x in sels]:
+            have = by.get(subj, set())
+            if want - have:
+                miss[subj] = sorted(want - have)
+            if have - want:
+                extra[subj] = sorted(have - want)
+        if len(sels) < k:
+            miss[f"선택과목 {k - len(sels)}개"] = sorted(sel)
+        dist = sum(len(v) for v in miss.values()) + sum(len(v) for v in extra.values()) \
+            + max(0, len(sels) - k) * len(sel)
+        if best is None or dist < best[0]:
+            best = (dist, name, miss, extra)
+    dist, name, miss, extra = best
+    return (name if dist == 0 else None), name, miss, extra
 
 
 # ---------------------------------------------------------------- 설정 -----
@@ -1345,16 +1400,14 @@ COMBINED_MSG = ("문제지와 해설지가 한 파일(합본)이거나 파일명
 
 
 def expected_numbers(jobs: List[Job]) -> Dict[str, List[int]]:
-    """과목별로 빠진 번호 목록."""
-    got: Dict[str, set] = {}
-    for j in jobs:
-        got.setdefault(j.subject, set()).add(j.num)
-    missing = {}
-    for subj, nums in got.items():
-        rng = range(1, 23) if subj == "공통" else range(23, 31)
-        miss = [n for n in rng if n not in nums]
-        if miss:
-            missing[subj] = miss
+    """과목별로 빠진 번호 목록. [패치 20] 틀(46/38/12) 기준 — 틀과 정확히 맞으면 빈 dict.
+    문제·해설이 섞여 있으면 종류마다 따로 보고 합친다."""
+    missing: Dict[str, List[int]] = {}
+    kinds = sorted({j.kind for j in jobs})
+    for kind in kinds:
+        _exact, _near, miss, _extra = match_template([j for j in jobs if j.kind == kind])
+        for subj, nums in miss.items():
+            missing[subj if len(kinds) == 1 else f"{kind} {subj}"] = nums
     return missing
 
 
@@ -1441,7 +1494,7 @@ def _side_record(jobs: List[Job], kind: str, plan: bool) -> Optional[dict]:
     js = [j for j in jobs if j.kind == kind]
     if not js:
         return None
-    rec = {"n": len(js), "template": None, "keys": [job_key(j) for j in js]}
+    rec = {"n": len(js), "template": match_template(js)[0], "keys": [job_key(j) for j in js]}
     if plan:
         rec["segments"] = {job_key(j): [[s.page, *[round(v, 2) for v in (s.clip.x0, s.clip.y0, s.clip.x1, s.clip.y1)]]
                                         for s in j.segments] for j in js}
@@ -1454,6 +1507,16 @@ def file_record(path: str, exam: str, input_kind: str, kind: Optional[str], stat
     """--json 의 file 레코드 (schema 1). 거부·실패 파일도 한 줄 남긴다."""
     if status == "ok" and dups:
         status = "partial"                      # [패치 18] 중복 키가 있으면 온전한 결과가 아니다
+    notes = list(notes or [])
+    for side in ("문제", "해설"):                # [패치 20] 틀과 안 맞으면 partial + 빠진·남는 번호
+        js = [j for j in (jobs or []) if j.kind == side]
+        if js:
+            exact, near, miss, extra = match_template(js)
+            if exact is None:
+                if status == "ok":
+                    status = "partial"
+                notes.append(f"{side} 틀 불일치 (가장 가까운 틀 {near}문항): "
+                             + " / ".join([f"{k} 빠짐 {v}" for k, v in miss.items()] + [f"{k} 남음 {v}" for k, v in extra.items()]))
     return {"duplicate_keys": list(dups or []),"schema": JSON_SCHEMA, "type": "file", "engine": engine_version(), "pymupdf": pymupdf.VersionBind,
             "file": os.path.basename(path), "exam": exam, "input_kind": input_kind, "kind": kind,
             "split_page": split_page, "status": status, "reason": reason,
