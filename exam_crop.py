@@ -117,6 +117,14 @@ CLI
     2) 합본은 CLI·GUI·build_jobs 모두에서 COMBINED_MSG 를 내고 멈춘다 (CLI 는 아무것도 자르기 전에 종료 코드 2).
     3) CLI `--kind 합본` 선택지는 없앴다. analyze()의 합본 분기는 남겨 두지만 더 이상 타지 않는다.
 
+[패치 15 · 2026-09-30 — 작은 조판 (A4 축소 양식, 서킷더베스트)]
+  패치 14로 문제지·해설지를 나눠도, 파일 안의 번호 찾기가 고정 크기 기준이라 서킷더베스트07회는
+  문제(9.9pt < 12.3)·해설(15.4pt < 17) 모두 0문항이었다. 종류는 이미 파일명이 정하므로 크기는
+  '번호냐 본문이냐'만 가르면 된다 → _small_type_pass (그 종류의 번호를 하나도 못 찾았을 때만):
+    1) 해설 파일에 해설 크기 번호가 없으면 문제 크기(≥12.3pt) 번호를 해설 번호로 쓴다 (패치 10의 거울).
+    2) 그래도 0개면 기준을 '본문 크기(글자 수 가중 최빈) × 1.1'로 낮춰 `N.` 번호를 다시 찾는다.
+  번호를 이미 찾는 파일은 그대로다 (26K28 문제·해설 46문항 자르는 영역 동일 확인).
+
 GUI 앱은 exam_crop_app.py 참고.
 """
 from __future__ import annotations
@@ -764,6 +772,52 @@ def _imgtxt_pass(pages: List[PageInfo], kind: str) -> List[str]:
     return notes
 
 
+# ---------------------------------------------- 패치 15: 작은 조판 -----
+SMALL_TYPE_HEAD_RATIO = 1.1   # 번호 크기 하한 = 본문 글자 크기 × 이 비 (본문 8.4pt → 9.24pt)
+
+
+def _body_size(pages: List[PageInfo]) -> float:
+    """문서 본문 글자 크기 — 글자 수로 가중한 최빈 크기."""
+    cnt: Dict[float, int] = {}
+    for p in pages:
+        for it in p.items:
+            if it.kind == "text":
+                k = round(it.size, 1)
+                cnt[k] = cnt.get(k, 0) + len(it.text)
+    return max(cnt, key=cnt.get) if cnt else 0.0
+
+
+def _small_type_pass(pages: List[PageInfo], kind: str) -> List[str]:
+    """[패치 15] 파일 종류(파일명)가 정해졌는데 그 종류의 번호를 하나도 못 찾았을 때만 동작한다.
+
+    패치 14로 종류는 파일명이 정하므로, 번호 크기는 '번호냐 본문이냐'만 가르면 된다.
+    A4로 축소 조판된 양식(서킷더베스트)은 번호가 고정 기준(문제 12.3pt·해설 17pt)에 못 미친다
+    (문제 9.9pt·해설 15.4pt, 본문 8.4pt).
+      1) 해설 파일: 해설 크기 번호가 0개이고 문제 크기 번호가 있으면 그것을 해설 번호로 쓴다 (패치 10의 거울).
+      2) 그래도 0개면 기준을 '본문 크기 × SMALL_TYPE_HEAD_RATIO'로 낮춰 `N.` 번호를 다시 찾는다.
+    번호를 이미 찾은 파일은 건드리지 않는다 — 종전 양식의 결과는 바뀌지 않는다.
+    """
+    attr = "prob_heads" if kind == "문제" else "sol_heads"
+    if any(getattr(p, attr) for p in pages):
+        return []
+    if kind == "해설" and any(p.prob_heads for p in pages):
+        n = 0
+        for p in pages:
+            p.sol_heads, p.prob_heads = sorted(p.prob_heads, key=lambda h: (h.col, h.rect.y0)), []
+            n += len(p.sol_heads)
+        return [f"해설 파일: 해설 크기(≥{SOL_HEADING_SIZE}pt) 번호가 없어 {PROB_HEADING_SIZE}pt 이상 번호 {n}개를 해설 번호로 사용"]
+    body = _body_size(pages)
+    min_size = round(body * SMALL_TYPE_HEAD_RATIO, 2)
+    if not body or min_size >= PROB_HEADING_SIZE:
+        return []
+    n = 0
+    for p in pages:
+        hs = find_headings(p.items, p.layout, p.no, min_size, strict=False)
+        setattr(p, attr, hs)
+        n += len(hs)
+    return [f"작은 조판: 본문 {body}pt → 번호 기준 {min_size}pt로 낮춰 {kind} 번호 {n}개 찾음"] if n else []
+
+
 def analyze(path: str, kind: str = "합본") -> Analysis:
     """PDF 전체를 한 번 훑어 페이지별 레이아웃·항목·문항 제목을 찾고, 문제/해설 구간을 나눈다.
 
@@ -817,6 +871,9 @@ def analyze(path: str, kind: str = "합본") -> Analysis:
         n_img = sum(1 for p in front for it in p.items if it.kind == "image")
         if front and n_img / len(front) >= IMGTXT_MIN_IMAGES:
             notes = _imgtxt_pass(front, "문제")
+
+    if not outline and kind in ("문제", "해설"):
+        notes += _small_type_pass(pages, kind)            # [패치 15]
 
     n_sol_raw = sum(len(p.sol_heads) for p in pages)      # 진단용 (병합 전 해설 크기 번호 수)
     if kind == "문제":
