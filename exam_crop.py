@@ -125,6 +125,11 @@ CLI
     2) 그래도 0개면 기준을 '본문 크기(글자 수 가중 최빈) × 1.1'로 낮춰 `N.` 번호를 다시 찾는다.
   번호를 이미 찾는 파일은 그대로다 (26K28 문제·해설 46문항 자르는 영역 동일 확인).
 
+[패치 19 · 2026-09-30 — 위쪽 여백 제한]  (보완 계획 v5 1-4, P6)
+  본문 상자의 위쪽이 머릿말 선(layout.top)보다 위에 있으면 선까지만 본문으로 보고 여백을 두른다.
+  머릿말 선 위는 렌더링 뒤 흰색으로 지우던 영역이라 내용은 같고, 남던 빈 여백만 없어진다.
+  (계획서의 "자르는 영역을 layout.top + 1.0 으로 제한"은 단 맨 위 조각 전부의 위쪽 여백을 줄여서 택하지 않았다.)
+
 [패치 18 · 2026-09-30 — 실패 격리 · 해설 과목을 읽기 순서의 라벨로 · 중복 키]  (보완 계획 v5 1-1·1-3, P7·P8)
   P7) 명령줄: 파일 하나가 예외로 죽어도 그 파일만 failed 레코드로 남기고 다음 파일로 간다.
   P8) 해설의 선택과목(23번 이상)은 **읽기 순서(쪽 → 단 → 위에서 아래)상 가장 최근에 지나온 과목 라벨**로 정한다.
@@ -176,7 +181,7 @@ import pymupdf  # PyMuPDF
 from PIL import Image
 
 # ------------------------------------------------------------ 엔진 식별 -----
-ENGINE_VERSION = "P18"                     # 패치 번호. 동작이 바뀌는 커밋마다 올린다
+ENGINE_VERSION = "P19"                     # 패치 번호. 동작이 바뀌는 커밋마다 올린다
 CAPABILITIES = frozenset({"json", "plan_only"})   # 러너는 이 집합만 보고 새 경로를 쓴다 (완성된 기능만 넣는다)
 JSON_SCHEMA = 1                            # --json 레코드 형식 번호. 필드를 빼거나 뜻을 바꾸면 올린다
 MIRROR_DIR = os.path.expanduser("~/audit_runner/crop_mirror")   # 맥미니 러너 전용 복사본 (여기서 뜨는 앱 = 러너 엔진)
@@ -1069,7 +1074,11 @@ def make_clip(bbox: pymupdf.Rect, layout: Layout, col: int, pad: float, full_wid
     if col < len(layout.dividers):
         cx1 = min(cx1, layout.dividers[col] - 1.5)
     cx0, cx1 = max(cx0, 0), min(cx1, layout.width)
-    cy0, cy1 = max(bbox.y0 - pad, 0), min(bbox.y1 + pad, layout.height)
+    # [패치 19] 본문 상자의 위쪽이 머릿말 선(layout.top) 위로 올라가 있으면 선까지만 본문으로 본다.
+    # 번호 줄의 키 큰 수식 때문에 줄 상자가 선 위로 올라가면 그만큼이 빈 여백으로 남았다 (강대X 9회 문제 미적 26).
+    # 선 위는 어차피 흰색으로 지우던 영역이다. 여백(pad)은 다른 조각과 똑같이 둔다 — 자르는 영역 자체를
+    # 선에서 끊으면 단 맨 위 조각 전부의 위쪽 여백이 3mm → 1~3pt 로 줄어든다 (코퍼스 927조각 중 167개).
+    cy0, cy1 = max(max(bbox.y0, layout.top) - pad, 0), min(bbox.y1 + pad, layout.height)
     return pymupdf.Rect(cx0, cy0, cx1, cy1)
 
 
