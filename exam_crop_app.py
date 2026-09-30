@@ -142,7 +142,7 @@ class ToolButton(tk.Label):
 
 
 class ExamSet:
-    """시험지 한 세트: 문제 파일 + 해설 파일, 또는 합본 파일 하나."""
+    """시험지 한 세트: 문제 파일 + 해설 파일.  (combined_file 은 패치 14 이후 채워지지 않는다 — 합본 거부)"""
 
     def __init__(self, name: str):
         self.name = name
@@ -464,8 +464,12 @@ class App(tk.Tk):
         if not paths:
             return
         self.cfg["last_open_dir"] = os.path.dirname(paths[0])
+        rejected = []
         for p in paths:
             name, kind = core.classify_filename(p)
+            if kind not in ("문제", "해설"):          # [패치 14] 합본은 받지 않는다
+                rejected.append(os.path.basename(p))
+                continue
             s = self.sets.get(name)
             if s is None:
                 s = self.sets[name] = ExamSet(name)
@@ -473,9 +477,9 @@ class App(tk.Tk):
                 s.problem_file = p
             elif kind == "해설":
                 s.solution_file = p
-            else:
-                s.combined_file = p
         self._refresh_tree()
+        if rejected:
+            messagebox.showerror(APP_TITLE, core.COMBINED_MSG + "\n\n추가하지 않은 파일:\n" + "\n".join(rejected))
 
     def remove_selected(self):
         for iid in self.tree.selection():

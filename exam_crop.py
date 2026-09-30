@@ -6,8 +6,8 @@ CLI
   python exam_crop.py 시험지_문제.pdf 시험지_해설.pdf ...   [--out crops] [--exam 이름] [--margin 3] [--dpi 600] [--split] [--debug]
                                                           [--pdf | --pdf-only]
 
-  파일명에 `_문제`(또는 `_문`) 가 있으면 문제지, `_해설`(또는 `_해`) 이 있으면 해설지,
-  둘 다 없으면 합본(문제 뒤에 해설)으로 보고 자동 감지한다.   [패치 10: _문/_해 축약형 추가]
+  파일명에 `_문제`(또는 `_문`) 가 있으면 문제지, `_해설`(또는 `_해`) 이 있으면 해설지.   [패치 10: _문/_해 축약형 추가]
+  둘 다 없거나 둘 다 있으면 합본으로 보고 **처리하지 않는다** — 문제지·해설지를 따로 나눠 넣어야 한다. [패치 14]
   --exam 을 주지 않으면 파일명에서 확장자와 _문제/_해설(_문/_해) 을 뗀 이름을 시험지명으로 쓴다.
 
 출력
@@ -107,6 +107,16 @@ CLI
     3) 이미지 글자 모드(_imgtxt_pass)에서만 동작 — 텍스트·외곽선 모드와 해설은 종전과 같다.
        (26K28: 1공통22·3확통30·4미적30·5기하30 네 문항만 바뀌고 나머지 42문항·해설 46문항은 동일)
 
+[패치 14 · 2026-09-30 — 합본 PDF 거부]
+  합본(한 파일에 문제+해설)은 번호 글자 크기로 문제/해설 구간을 갈라 왔는데, 조판 크기가 다른 양식에서는
+  판단이 제각각이다. 서킷더베스트(07회) A4 합본은 해설 번호(15.4pt)가 해설 기준(17pt)에 못 미치고 문제 기준
+  (12.3pt)은 넘어 해설 12개가 `_문제_` 이름으로 잘렸고, 진짜 문제(9.9pt)는 0개였다.
+  → 문제지·해설지는 **언제나 별도 파일**로만 받는다. 종류는 파일명으로만 정한다.
+    1) classify_filename: 이름에 문제 표기와 해설 표기가 **둘 다** 있으면('…문제및해설') 합본으로 본다.
+       (한쪽만 있으면 종전과 같다. 시그니처·반환값 형식은 그대로 — 맥미니 러너가 의존한다.)
+    2) 합본은 CLI·GUI·build_jobs 모두에서 COMBINED_MSG 를 내고 멈춘다 (CLI 는 아무것도 자르기 전에 종료 코드 2).
+    3) CLI `--kind 합본` 선택지는 없앴다. analyze()의 합본 분기는 남겨 두지만 더 이상 타지 않는다.
+
 GUI 앱은 exam_crop_app.py 참고.
 """
 from __future__ import annotations
@@ -115,6 +125,7 @@ import argparse
 import io
 import os
 import re
+import sys
 import unicodedata
 from dataclasses import dataclass, field
 from typing import Callable, Dict, List, Optional, Tuple
@@ -1108,14 +1119,19 @@ def classify_filename(path: str) -> Tuple[str, str]:
 
     [패치 10] `_문제`/`_해설` 외에 `_문`/`_해` 축약 표기도 인식한다.
       K25(260915)_문.pdf → ('K25(260915)', '문제'),  K25(260915)_해.pdf → ('K25(260915)', '해설')
+    [패치 14] 표기가 없거나 문제·해설 표기가 둘 다 있으면 '합본' — 합본은 처리하지 않는다 (COMBINED_MSG).
     """
     # macOS 파일명은 한글이 자모 분리형(NFD)으로 저장되므로 완성형(NFC)으로 맞춘 뒤 판별한다.
     stem = unicodedata.normalize("NFC", os.path.splitext(os.path.basename(path))[0])
-    kind = "합본"
-    m = KIND_RE.search(stem)
-    if m:
-        kind = kind_of_match(m)
+    kinds = {kind_of_match(m) for m in KIND_RE.finditer(stem)}
+    kind = kinds.pop() if len(kinds) == 1 else "합본"
     return clean_exam_name(stem) or stem, kind
+
+
+# [패치 14] 합본 거부 안내 — CLI·GUI·맥미니 러너가 같은 문구를 쓴다
+COMBINED_MSG = ("문제지와 해설지가 한 파일(합본)이거나 파일명에 '문제'/'해설' 표기가 없습니다. "
+                "문제지와 해설지를 별도의 PDF로 나누고, 파일명에 각각 '문제', '해설'을 넣어 주세요 "
+                "(예: 시험지명_문제.pdf, 시험지명_해설.pdf).")
 
 
 def expected_numbers(jobs: List[Job]) -> Dict[str, List[int]]:
@@ -1133,6 +1149,8 @@ def expected_numbers(jobs: List[Job]) -> Dict[str, List[int]]:
 
 
 def build_jobs(path: str, exam: str, kind: str, pad_pt: float, split: bool) -> Tuple[Analysis, List[Job]]:
+    if kind not in ("문제", "해설"):          # [패치 14] 합본은 자르지 않는다
+        raise ValueError(f"{os.path.basename(path)}: {COMBINED_MSG}")
     an = analyze(path, kind)
     jobs: List[Job] = []
     if kind in ("문제", "합본"):
@@ -1195,7 +1213,7 @@ def main(argv=None):
     ap.add_argument("pdfs", nargs="+")
     ap.add_argument("--out", default="crops", help="출력 폴더 (기본: ./crops)")
     ap.add_argument("--exam", default=None, help="시험지명 (기본: 파일명에서 _문제/_해설(_문/_해) 을 뗀 이름)")
-    ap.add_argument("--kind", choices=["auto", "문제", "해설", "합본"], default="auto")
+    ap.add_argument("--kind", choices=["auto", "문제", "해설"], default="auto")   # [패치 14] 합본 없음
     ap.add_argument("--margin", type=float, default=3.0, help="본문 주변 여백(mm)")
     ap.add_argument("--dpi", type=int, default=600)
     ap.add_argument("--split", action="store_true", help="(패치 7 이후 기본 동작과 동일 — 호환용)")
@@ -1205,6 +1223,13 @@ def main(argv=None):
     args = ap.parse_args(argv)
     want_pdf = args.pdf or args.pdf_only
     want_png = not args.pdf_only
+
+    # [패치 14] 합본이 하나라도 있으면 아무것도 자르기 전에 멈춘다
+    combined = [p for p in args.pdfs if args.kind == "auto" and classify_filename(p)[1] == "합본"]
+    if combined:
+        for p in combined:
+            print(f"[{os.path.basename(p)}] 중단: {COMBINED_MSG}", file=sys.stderr)
+        sys.exit(2)
 
     total = 0
     for path in args.pdfs:
