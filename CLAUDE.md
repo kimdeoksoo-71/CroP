@@ -1,7 +1,10 @@
 # CroP
 
-시험지 PDF 크롭 앱. 웹 Claude로 만들어 파일로 관리해 왔고, 이후 수정은 맥북 Claude Code가 맡는다.
+시험지 PDF 크롭 앱. 웹 Claude로 만들어 파일로 관리해 왔고, **2026-09-30부터 수정은 맥미니 Claude Code(클루)가 맡는다.**
+주 개발 clone은 맥미니 `~/CLUE/repos/CroP` 이다. 맥북 clone은 보조이며, 맥북에서 고칠 때는 **먼저 `git pull`** 한다.
 수정본은 GitHub 저장소 `kimdeoksoo-71/CroP` 의 `main` 브랜치에 올린다.
+이 레포는 **PUBLIC** 이다. 시험지 PDF·크롭 결과·내부 계획서·사고 기록은 올리지 않는다
+(개발 문서는 비공개 레포 `kimdeoksoo-71/audit-pipeline-docs` = 맥미니 `~/CLUE/projects/문항검증자동화/`).
 맥미니의 무인 파이프라인이 GitHub `main`을 자동으로 받아 가서, 시험(문법·시행 테스트)을 통과하면 사용한다.
 
 ## CroP 올려줘
@@ -24,6 +27,7 @@
 ## 맥미니 러너
 
 - 맥미니 러너는 GitHub `main`을 자동으로 받아 시험(문법·시행 테스트)을 하고, 통과하면 사용한다.
+  러너는 개발 clone이 아니라 **전용 복사본 `~/audit_runner/crop_mirror`** 로 받는다. 푸시되지 않은 변경은 러너에 반영되지 않는다.
 - 시험에 실패하면 이전 버전을 계속 쓰고, 텔레그램으로 알린다.
 
 ## .gitignore 로 제외되는 것
