@@ -7,6 +7,20 @@
 (개발 문서는 비공개 레포 `kimdeoksoo-71/audit-pipeline-docs` = 맥미니 `~/CLUE/projects/문항검증자동화/`).
 맥미니의 무인 파이프라인이 GitHub `main`을 자동으로 받아 가서, 시험(문법·시행 테스트)을 통과하면 사용한다.
 
+## 푸시 전 필수 검사 (2026-09-30, 보완 계획 v5)
+
+1. `python3 -m py_compile exam_crop.py exam_crop_app.py`
+2. `~/audit_runner/venv/bin/python -m runner.corpus_check --engine <커밋 SHA 또는 작업 트리 경로>` — 코퍼스 전체의 `--plan-only` 계획이 기대값과 같아야 한다. 의도한 차이는 커밋 메시지에 파일·키 단위로 적는다.
+   (corpus_check 가 아직 없으면 `~/audit_runner` 의 `engine.smoke_test` 로 대신한다.)
+3. **엔진은 `exam_crop.py` 한 파일**이어야 한다. 러너는 커밋에서 이 파일만 꺼낸다. 다른 모듈 import 금지(표준 라이브러리·pymupdf·PIL 제외). `CAPABILITIES` 에는 완성된 기능만 넣는다.
+4. 동작이 바뀌면 `ENGINE_VERSION` 을 올린다.
+
+## 앱 실행 위치 (맥미니)
+
+- **덕수님용 앱 = `~/audit_runner/crop_mirror/CroP.command`** — 러너가 채택한 커밋으로 맞춰진다. 창 제목에 `(러너와 동일)` 이 보여야 한다.
+- 개발 clone(`~/CLUE/repos/CroP`)의 `CroP.command` 는 개발 확인용. 창 제목 `[DEV]`, 작업 중(dirty)이거나 main 이 아니면 시작 시 경고한다.
+- 실행 환경: python.org Python 3.12 + venv `~/examcrop` (`requirements.txt`). Homebrew python-tk 는 쓰지 않는다.
+
 ## CroP 올려줘
 
 사용자가 "CroP 올려줘"라고 하면 아래 순서대로 한다.
