@@ -142,13 +142,14 @@ class ToolButton(tk.Label):
 
 
 class ExamSet:
-    """시험지 한 세트: 문제 파일 + 해설 파일.  (combined_file 은 패치 14 이후 채워지지 않는다 — 합본 거부)"""
+    """시험지 한 세트: 문제 파일 + 해설 파일, 또는 합본 파일 하나 (합본은 「정답 및 해설」 표지에서 나눈다, 패치 22)."""
 
     def __init__(self, name: str):
         self.name = name
         self.problem_file: Optional[str] = None
         self.solution_file: Optional[str] = None
         self.combined_file: Optional[str] = None
+        self.infos: Dict[str, dict] = {}   # [패치 22] 경로 → core.inspect_pdf 결과 (종류·분할 쪽·의심 표시)
         self.status = "대기"
         self.summary = ""
         self.warnings: List[str] = []      # 누락 문항 등 상세 경고문
@@ -492,22 +493,44 @@ class App(tk.Tk):
         if not paths:
             return
         self.cfg["last_open_dir"] = os.path.dirname(paths[0])
-        rejected = []
+        rejected = self.add_paths(paths)
+        if rejected:
+            messagebox.showerror(APP_TITLE, "추가하지 않은 파일:\n\n" + "\n\n".join(rejected))
+
+    def add_paths(self, paths) -> List[str]:
+        """[패치 22] 파일명 + 표지로 종류를 판정해 세트에 넣는다 → 넣지 못한 파일의 '이름: 사유' 목록.
+        합본은 한 세트에 '합본' 유형으로 들어간다. 러너와 같은 판정(core.inspect_pdf)을 쓴다."""
+        rejected: List[str] = []
         for p in paths:
-            name, kind = core.classify_filename(p)
-            if kind not in ("문제", "해설"):          # [패치 14] 합본은 받지 않는다
-                rejected.append(os.path.basename(p))
+            info = core.inspect_pdf(p)
+            base = os.path.basename(p)
+            if info["status"] == "rejected":
+                rejected.append(f"{base}: {info['message']}")
                 continue
+            name, kind = info["exam"], info["kind"]
             s = self.sets.get(name)
+            if s is not None and ((kind == "합본" and (s.problem_file or s.solution_file))
+                                  or (kind != "합본" and s.combined_file)):
+                rejected.append(f"{base}: {core.REJECT_MSG['duplicate_input']}")
+                continue
             if s is None:
                 s = self.sets[name] = ExamSet(name)
-            if kind == "문제":
+            if kind == "합본":
+                s.combined_file = p
+            elif kind == "문제":
                 s.problem_file = p
-            elif kind == "해설":
+            else:
                 s.solution_file = p
+            s.infos[p] = info
+            if info["multi_exam_suspect"]:                  # 러너는 이런 세트를 제외한다 — 앱에서도 빨갛게
+                s.warnings = [w for w in s.warnings if not w.startswith("여러 회차")] + [self._suspect_text(info)]
         self._refresh_tree()
-        if rejected:
-            messagebox.showerror(APP_TITLE, core.COMBINED_MSG + "\n\n추가하지 않은 파일:\n" + "\n".join(rejected))
+        return rejected
+
+    @staticmethod
+    def _suspect_text(info: dict) -> str:
+        pages = [n for n in info["notes"] if n.startswith(("problem_pages_in_solution", "cover_segments"))]
+        return "여러 회차가 한 파일에 섞인 것으로 보임" + (f" ({'; '.join(pages)})" if pages else "")
 
     def remove_selected(self):
         for iid in self.tree.selection():
@@ -653,11 +676,16 @@ class App(tk.Tk):
             plans, total = [], 0
             keys_of: Dict[ExamSet, Dict[str, List[str]]] = {}   # [패치 20] 세트별 문제/해설 키 (쌍 대조용, 건너뛰기 전 전체)
             dups_of: Dict[ExamSet, List[str]] = {}              # [패치 20] 세트별 중복 번호
+            suspects: Dict[ExamSet, str] = {}                   # [패치 22] 여러 회차 의심 세트
             for s in list(self.sets.values()):
                 self.q.put(("status", s, "분석 중"))
                 for path, kind in s.files():
                     try:
-                        an, jobs = core.build_jobs(path, s.name, kind, pad_pt, cfg["split_solutions"])
+                        # [패치 22] 파일 추가 때의 판정(종류·분할 쪽)대로 계획한다. 합본은 표지 쪽에서 두 구간으로.
+                        info = dict(s.infos.get(path) or core.inspect_pdf(path))
+                        if info.get("kind") != kind and kind != "합본":   # 목록에서 세트를 합치며 종류가 정해진 경우
+                            info.update(kind=kind, split_page=None)
+                        jobs, notes, dups, fail = core.plan_file(path, s.name, info, pad_pt, cfg["split_solutions"])
                     except Exception as e:  # noqa: BLE001
                         self.q.put(("log", f"[{os.path.basename(path)}] 분석 실패: {e}"))
                         self.q.put(("summary", s, f"실패: {e}", []))
@@ -665,15 +693,20 @@ class App(tk.Tk):
                     # [패치 10] 파일마다 분석 결과 한 줄 — 종류 판정과 문제/해설 문항 수를 바로 볼 수 있게
                     jp = sum(1 for j in jobs if j.kind == "문제")
                     js = sum(1 for j in jobs if j.kind == "해설")
-                    self.q.put(("log", f"[{os.path.basename(path)}] 종류={kind} · 문항 {len(jobs)}"
-                                       f" (문제 {jp} / 해설 {js}; 문제 페이지 {len(an.problem_pages)}, 해설 페이지 {len(an.solution_pages)})"))
-                    for note in getattr(an, "notes", []):      # [패치 8] 외곽선 감지 모드 등 안내
+                    where = f" · 표지 {info['split_page'] + 1}쪽에서 분할" if info.get("kind") == "합본" else ""
+                    self.q.put(("log", f"[{os.path.basename(path)}] 종류={info.get('kind')}{where} · 문항 {len(jobs)}"
+                                       f" (문제 {jp} / 해설 {js})"))
+                    for note in notes:                         # [패치 8] 외곽선 감지 모드 등 안내
                         self.q.put(("log", f"[{os.path.basename(path)}] {note}"))
-                    if not jobs:
+                    if fail:                                   # 한 구간이라도 0문항이면 그 파일은 자르지 않는다
                         self.q.put(("log", f"[{os.path.basename(path)}] 문항을 찾지 못했습니다 (텍스트 PDF가 아니거나 양식이 다름)"))
+                        self.q.put(("summary", s, "실패: 문항을 찾지 못함", []))
+                        continue
                     for j in jobs:
                         keys_of.setdefault(s, {}).setdefault(j.kind, []).append(core.job_key(j))
-                    dups_of.setdefault(s, []).extend(getattr(an, "duplicate_keys", []))
+                    dups_of.setdefault(s, []).extend(dups)
+                    if info.get("multi_exam_suspect"):
+                        suspects.setdefault(s, self._suspect_text(info))
                     if not cfg["overwrite"]:
                         before = len(jobs)
                         # 이 문항이 만들 파일(PNG/PDF)이 전부 이미 있을 때만 건너뜀
@@ -739,6 +772,8 @@ class App(tk.Tk):
                                     + (f" 해설에만 {' '.join(only_s[:6])}" if only_s else ""))
                 if dups_of.get(s):
                     warnings.append(f"중복 번호 {' '.join(dups_of[s][:6])}")
+                if s in suspects:
+                    warnings.append(suspects[s])
                 self.q.put(("summary", s, " / ".join(parts), warnings))
                 warn = ("  ⚠ " + " / ".join(warnings)) if warnings else ""
                 self.q.put(("log", f"[{s.name}] {os.path.basename(path)} → {len(written)}개 저장{warn}"))
