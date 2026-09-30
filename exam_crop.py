@@ -125,6 +125,17 @@ CLI
     2) 그래도 0개면 기준을 '본문 크기(글자 수 가중 최빈) × 1.1'로 낮춰 `N.` 번호를 다시 찾는다.
   번호를 이미 찾는 파일은 그대로다 (26K28 문제·해설 46문항 자르는 영역 동일 확인).
 
+[패치 18 · 2026-09-30 — 실패 격리 · 해설 과목을 읽기 순서의 라벨로 · 중복 키]  (보완 계획 v5 1-1·1-3, P7·P8)
+  P7) 명령줄: 파일 하나가 예외로 죽어도 그 파일만 failed 레코드로 남기고 다음 파일로 간다.
+  P8) 해설의 선택과목(23번 이상)은 **읽기 순서(쪽 → 단 → 위에서 아래)상 가장 최근에 지나온 과목 라벨**로 정한다.
+      종전에는 쪽 전체 텍스트에서 과목명을 찾아, 한 쪽에 '확통 29번 → [미적분] 라벨 → 미적 28번'이 있으면
+      확통 29번까지 미적으로 붙었다 (260211 서킷06·08, SOLN 함초롬판: 미적29/30 중복, 확통29/30 누락).
+      - 라벨 = 줄 전체가 과목명인 텍스트 줄 (`[확률과 통계]`, `미적분 해설` 등, 글자 크기 무관).
+      - 첫 해설 번호보다 앞에 나온 라벨은 무시한다 (표지의 빠른 정답표).
+      - 라벨로 매긴 결과에 중복 키가 생기고 종전 방식에는 없으면 종전 방식으로 되돌린다 (라벨이 텍스트가 아닌 양식).
+  중복 키) 한 파일에서 같은 키가 두 번 나오면 두 번째는 쓰지 않는다 (먼저 것을 덮어쓰지 않음).
+      notes 에 `duplicate_key: …`, file 레코드 duplicate_keys, set 레코드 exclude_reasons 에 duplicate_key.
+
 [패치 17 · 2026-09-30 — 번호만 이미지인 PDF (패치 12.1 복원, 보완 계획 v5 0-3 P5)]
   본문은 텍스트인데 문항 번호만 이미지로 들어간 문제지가 있다 (SOLN.26FS02 MS Print 원판: 번호 글꼴이
   PDF 프린터에서 그림으로 바뀜). 쪽당 이미지 수가 적어 패치 11(이미지 글자 모드)의 진입 조건에 못 미치고,
@@ -165,7 +176,7 @@ import pymupdf  # PyMuPDF
 from PIL import Image
 
 # ------------------------------------------------------------ 엔진 식별 -----
-ENGINE_VERSION = "P17"                     # 패치 번호. 동작이 바뀌는 커밋마다 올린다
+ENGINE_VERSION = "P18"                     # 패치 번호. 동작이 바뀌는 커밋마다 올린다
 CAPABILITIES = frozenset({"json", "plan_only"})   # 러너는 이 집합만 보고 새 경로를 쓴다 (완성된 기능만 넣는다)
 JSON_SCHEMA = 1                            # --json 레코드 형식 번호. 필드를 빼거나 뜻을 바꾸면 올린다
 MIRROR_DIR = os.path.expanduser("~/audit_runner/crop_mirror")   # 맥미니 러너 전용 복사본 (여기서 뜨는 앱 = 러너 엔진)
@@ -237,6 +248,8 @@ MC_HEAD_INLINE_RE = re.compile(r"^(\d{1,2})\.\s*\[?\s*정답")    # 한 줄로 �
 MC_LABEL_RE = re.compile(r"^\[?\s*(공통(?:\s*과목)?|확률\s*과\s*통계|미적분|기하|해설)\s*\]?$")
 MC_LABEL_MIN_SIZE = 12.0     # 과목·[해설] 라벨 글자 크기 하한 (본문 9pt 내외, 라벨 14.6pt)
 MC_LABEL_SUBJ = {"공통": "공통", "공통과목": "공통", "확률과통계": "확통", "미적분": "미적", "기하": "기하"}
+# [패치 18] 해설 과목 라벨: 줄 전체가 과목명 (대괄호·'해설' 접미 허용, 글자 크기 무관)
+SUBJ_LABEL_RE = re.compile(r"^\[?\s*(공통(?:\s*과목)?|확률\s*과\s*통계|미적분|기하)(?:\s*해설)?\s*\]?$")
 PROB_HEADING_SIZE = 12.3     # 문제 번호 글자 크기 하한 (본문 11pt 내외, 번호 13pt 내외)
 SOL_HEADING_SIZE = 17.0      # 해설 번호 글자 크기 하한 (20pt 내외)
 MM = 72 / 25.4               # 1mm → pt
@@ -351,6 +364,7 @@ class Analysis:
     solution_pages: List[int]
     outline: bool = False              # [패치 8] 외곽선 PDF 감지 모드로 분석했는가
     notes: List[str] = field(default_factory=list)   # [패치 8] 감지 과정의 경고·안내
+    duplicate_keys: List[str] = field(default_factory=list)   # [패치 18] 두 번 나온 키 (두 번째부터 버림)
 
 
 # ------------------------------------------------------- 페이지 분석 -----
@@ -1109,7 +1123,53 @@ def plan_problems(an: Analysis, exam: str, pad: float, order=DEFAULT_ORDER) -> L
     return jobs
 
 
+def solution_label_subjects(an: Analysis) -> Dict[Tuple[int, int, float], str]:
+    """[패치 18] 해설 번호(23번 이상)마다 읽기 순서상 가장 최근에 지나온 과목 라벨의 과목.
+    → {(쪽, 단, 번호 y0): 과목}. 첫 해설 번호보다 앞의 라벨(표지 정답표)은 무시한다.
+    라벨이 하나도 안 걸리면 빈 dict (종전 방식: 23번이 다시 나올 때마다 순서 배정)."""
+    events = []
+    for pno in an.solution_pages:
+        p = an.pages[pno]
+        for it in p.items:
+            if it.kind == "text":
+                m = SUBJ_LABEL_RE.match(it.text.strip())
+                if m:
+                    events.append((pno, p.layout.col_of(it.rect), it.rect.y0, 0,
+                                   MC_LABEL_SUBJ.get(re.sub(r"\s+", "", m.group(1)))))
+        for h in p.sol_heads:
+            events.append((pno, h.col, h.rect.y0, 1, h.num))
+    events.sort(key=lambda e: e[:4])
+    out: Dict[Tuple[int, int, float], str] = {}
+    seen_head, cur = False, None
+    for pno, col, y0, is_head, val in events:
+        if not is_head:
+            if seen_head:
+                cur = val if val != "공통" else None
+        else:
+            seen_head = True
+            if val >= 23 and cur:
+                out[(pno, col, y0)] = cur
+    return out
+
+
+def duplicate_keys(jobs: List[Job]) -> List[str]:
+    keys = [f"{j.kind}_{SUBJECT_CODES[j.subject]}{j.num:02d}" for j in jobs]
+    return sorted({k for k in keys if keys.count(k) > 1})
+
+
 def plan_solutions(an: Analysis, exam: str, pad: float, split: bool, order=DEFAULT_ORDER) -> List[Job]:
+    """[패치 18] 과목은 읽기 순서의 라벨로 정한다. 그 결과에만 중복 키가 생기면 종전 방식으로 되돌린다."""
+    labels = solution_label_subjects(an)
+    jobs = _plan_solutions(an, exam, pad, split, order, labels)
+    if labels and duplicate_keys(jobs):
+        alt = _plan_solutions(an, exam, pad, split, order, {})
+        if not duplicate_keys(alt):
+            an.notes.append("과목 라벨로 매기면 중복이 생겨 종전 방식(23번이 다시 나올 때마다 순서 배정)을 사용")
+            return alt
+    return jobs
+
+
+def _plan_solutions(an: Analysis, exam: str, pad: float, split: bool, order, label_map) -> List[Job]:
     tracker = SubjectTracker(list(order))
     jobs: List[Job] = []
     current: Optional[Job] = None
@@ -1147,6 +1207,7 @@ def plan_solutions(an: Analysis, exam: str, pad: float, split: bool, order=DEFAU
                     subj = tracker.subject_for(h.num)
                     if multicol and label_subj and ((label_subj == "공통") == (h.num <= 22)):
                         subj = label_subj     # [패치 12] 라벨 과목 우선 (번호 범위와 맞을 때만)
+                    subj = label_map.get((pno, h.col, h.rect.y0), subj)   # [패치 18] 읽기 순서 라벨이 있으면 그것
                     current = Job("해설", subj, h.num, exam, [], split)
                     jobs.append(current)
                 for _lb, s in labels:     # [패치 12] 이 조각 뒤에 오는 문항부터 라벨 과목 적용
@@ -1297,7 +1358,21 @@ def build_jobs(path: str, exam: str, kind: str, pad_pt: float, split: bool) -> T
         jobs += plan_problems(an, exam, pad_pt)
     if kind in ("해설", "합본"):
         jobs += plan_solutions(an, exam, pad_pt, split)
-    return an, jobs
+    # [패치 18] 같은 키가 두 번 나오면 두 번째는 쓰지 않는다 (먼저 자른 것을 덮어쓰지 않게)
+    seen: Dict[str, Job] = {}
+    kept: List[Job] = []
+    dups: Dict[str, List[Job]] = {}
+    for j in jobs:
+        if j.base in seen:
+            dups.setdefault(j.base, [seen[j.base]]).append(j)
+            continue
+        seen[j.base] = j
+        kept.append(j)
+    for base, js in dups.items():
+        where = ", ".join(f"p{x.segments[0].page + 1}" for x in js if x.segments)
+        an.notes.append(f"duplicate_key: {base.split('_')[-1]} ({where}) — 두 번째부터는 쓰지 않음")
+    an.duplicate_keys = sorted(b.split("_")[-1] for b in dups)
+    return an, kept
 
 
 def output_paths(job: Job, outdir: str, png: bool = True, pdf: bool = False) -> List[str]:
@@ -1366,9 +1441,11 @@ def _side_record(jobs: List[Job], kind: str, plan: bool) -> Optional[dict]:
 
 def file_record(path: str, exam: str, input_kind: str, kind: Optional[str], status: str, reason: Optional[str],
                 jobs: Optional[List[Job]] = None, notes: Optional[List[str]] = None,
-                plan: bool = False, split_page: Optional[int] = None) -> dict:
+                plan: bool = False, split_page: Optional[int] = None, dups: Optional[List[str]] = None) -> dict:
     """--json 의 file 레코드 (schema 1). 거부·실패 파일도 한 줄 남긴다."""
-    return {"schema": JSON_SCHEMA, "type": "file", "engine": engine_version(), "pymupdf": pymupdf.VersionBind,
+    if status == "ok" and dups:
+        status = "partial"                      # [패치 18] 중복 키가 있으면 온전한 결과가 아니다
+    return {"duplicate_keys": list(dups or []),"schema": JSON_SCHEMA, "type": "file", "engine": engine_version(), "pymupdf": pymupdf.VersionBind,
             "file": os.path.basename(path), "exam": exam, "input_kind": input_kind, "kind": kind,
             "split_page": split_page, "status": status, "reason": reason,
             "problem": _side_record(jobs or [], "문제", plan), "solution": _side_record(jobs or [], "해설", plan),
@@ -1399,6 +1476,10 @@ def set_record(exam: str, files: List[dict]) -> dict:
         if dups:
             reasons.append("duplicate_key")
             notes.append(f"duplicate_key({side}): {dups}")
+    for f in files:                             # [패치 18] 파일 안에서 두 번 나와 버려진 키
+        if f.get("duplicate_keys"):
+            reasons.append("duplicate_key")
+            notes.append(f"duplicate_key({f['file']}): {f['duplicate_keys']}")
     reasons = list(dict.fromkeys(reasons))
     order = ["rejected", "failed", "partial", "ok"]
     status = min((f["status"] for f in files), key=order.index) if files else "failed"
@@ -1459,7 +1540,14 @@ def main(argv=None):
                               notes=[COMBINED_MSG])
             records.append(rec); by_exam.setdefault(exam, []).append(rec)
             continue
-        an, jobs = build_jobs(path, exam, kind, args.margin * MM, args.split)
+        try:
+            an, jobs = build_jobs(path, exam, kind, args.margin * MM, args.split)
+        except Exception as e:  # noqa: BLE001 — [패치 18] 한 파일의 실패가 나머지를 막지 않게
+            say(f"[{os.path.basename(path)}] 실패: {type(e).__name__}: {e}")
+            why = str(e).replace(path, os.path.basename(path))          # 사유에 절대 경로를 남기지 않는다
+            rec = file_record(path, exam, input_kind, kind, "failed", f"exception: {type(e).__name__}: {why}"[:300])
+            records.append(rec); by_exam.setdefault(exam, []).append(rec)
+            continue
         say(f"[{os.path.basename(path)}] 시험지명={exam} 종류={kind} "
             f"문제페이지={len(an.problem_pages)} 해설페이지={len(an.solution_pages)} 문항={len(jobs)}")
         for note in an.notes:
@@ -1467,7 +1555,8 @@ def main(argv=None):
         for subj, miss in expected_numbers(jobs).items():
             say(f"  ! {subj} 누락 번호: {miss}")
         status, reason = ("failed", "zero_items") if not jobs else ("ok", None)
-        rec = file_record(path, exam, input_kind, kind, status, reason, jobs, an.notes, plan=args.plan_only)
+        rec = file_record(path, exam, input_kind, kind, status, reason, jobs, an.notes, plan=args.plan_only,
+                          dups=an.duplicate_keys)
         records.append(rec); by_exam.setdefault(exam, []).append(rec)
         if args.plan_only:
             continue
@@ -1476,7 +1565,12 @@ def main(argv=None):
             if name:
                 say(f"  {i + 1:>3}/{n}  {name}")
 
-        written = run_jobs(path, jobs, args.dpi, args.out, prog, png=want_png, pdf=want_pdf)
+        try:
+            written = run_jobs(path, jobs, args.dpi, args.out, prog, png=want_png, pdf=want_pdf)
+        except Exception as e:  # noqa: BLE001 — [패치 18]
+            say(f"[{os.path.basename(path)}] 자르기 실패: {type(e).__name__}: {e}")
+            rec.update(status="failed", reason=f"exception: {type(e).__name__}: {e}"[:300])
+            continue
         total += len(written)
         if args.debug:
             dp = os.path.join(args.out, f"{exam}_{kind}_debug.pdf")
