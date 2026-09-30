@@ -202,10 +202,34 @@ class Sidebar(tk.Frame):
         self.on_select(key)
 
 
+def engine_banner() -> tuple:
+    """[패치 16] (창 제목, 로그 첫 줄, DEV 경고문 또는 None).
+    러너 미러(~/audit_runner/crop_mirror)에서 뜬 앱은 러너 엔진과 같다. 개발 clone 이면 [DEV] 를 붙이고,
+    작업 중(dirty)이거나 main 이 아니면 경고문을 돌려준다. 러너 활성 SHA(engine/ACTIVE)가 있으면 같은지 표시한다."""
+    ver = core.engine_version()
+    st = core.engine_git_state()
+    dev = core.is_dev_checkout()
+    active = None
+    try:
+        active = open(os.path.expanduser("~/audit_runner/engine/ACTIVE"), encoding="utf-8").read().strip()[:7] or None
+    except OSError:
+        pass
+    same = None if not (active and st["sha"]) else (active == st["sha"] and not st["dirty"])
+    tag = "" if same is None else (" (러너와 동일)" if same else f" (러너 {active}와 다름)")
+    title = f"{'[DEV] ' if dev else ''}{APP_TITLE} {ver}{tag}"
+    warn = None
+    if dev and (st["dirty"] or (st["branch"] not in (None, "main"))):
+        warn = (f"개발 clone 의 엔진으로 실행 중입니다 ({ver}, 브랜치 {st['branch']}).\n"
+                "커밋되지 않았거나 main 이 아닌 코드라 러너·다른 사람과 결과가 다를 수 있습니다.\n"
+                "덕수님용 앱은 ~/audit_runner/crop_mirror/CroP.command 입니다. 그래도 계속할까요?")
+    return title, f"CroP 엔진 {ver} (pymupdf {core.pymupdf.VersionBind}){tag}", warn
+
+
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title(APP_TITLE)
+        self._title, self._banner, self._dev_warn = engine_banner()
+        self.title(self._title)
         self.geometry("1040x700")
         self.minsize(880, 560)
         self.cfg = load_config()
@@ -221,6 +245,10 @@ class App(tk.Tk):
         self._style()
         self._build_ui()
         self.sidebar.select("sets")
+        self._log(self._banner)                    # [패치 16] 로그 첫 줄 = 엔진 버전
+        if self._dev_warn and not messagebox.askokcancel(APP_TITLE, self._dev_warn):
+            self.after(0, self.destroy)
+            return
         self.after(100, self._poll_queue)
         self.protocol("WM_DELETE_WINDOW", self._on_close)
 
@@ -750,6 +778,7 @@ class App(tk.Tk):
         self.log.config(state="normal")
         self.log.delete("1.0", "end")
         self.log.config(state="disabled")
+        self._log(self._banner)                    # [패치 16] 지운 뒤에도 첫 줄은 엔진 버전
 
     # ------------------------------------------------- 결과 파일 이동 -----
     def _add_result(self, p: str):
