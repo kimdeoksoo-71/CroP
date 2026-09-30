@@ -125,6 +125,16 @@ CLI
     2) 그래도 0개면 기준을 '본문 크기(글자 수 가중 최빈) × 1.1'로 낮춰 `N.` 번호를 다시 찾는다.
   번호를 이미 찾는 파일은 그대로다 (26K28 문제·해설 46문항 자르는 영역 동일 확인).
 
+[패치 16 · 2026-09-30 — 엔진 버전·기능 목록·결과 JSON·계획 출력]  (보완 계획 v5 0-4·0-5)
+  - ENGINE_VERSION / CAPABILITIES / engine_version(): 러너·앱·corpus_check 가 엔진을 식별한다.
+    SHA 는 (1) 같은 폴더의 _build_info.py(러너가 꺼낼 때 씀, import 가 아니라 파일로 읽음)
+    (2) 이 폴더가 git 작업 트리의 최상위일 때만 git (3) 아니면 unknown. import 시점에는 아무것도 실행하지 않는다.
+  - --json <경로>: 파일마다 file 레코드, 시험지마다 set 레코드 (JSON Lines, schema 1). §3.4
+  - --plan-only: 자르지 않고 계획(문항 키·조각 영역)만 레코드로 낸다. 코퍼스 회귀 비교의 기준. §3.5
+  - 합본은 sys.exit(2) 대신 rejected 레코드(combined_not_supported)로 남기고 다음 파일로 간다.
+    종료 코드: 0 = failed·rejected 없음 / 1 = failed 있음 / 3 = failed 없고 rejected 있음.
+  - 이 파일은 계속 **한 파일**이어야 한다 — 맥미니 러너는 커밋에서 exam_crop.py 만 꺼내 쓴다.
+
 GUI 앱은 exam_crop_app.py 참고.
 """
 from __future__ import annotations
@@ -132,7 +142,9 @@ from __future__ import annotations
 import argparse
 import io
 import os
+import json
 import re
+import subprocess
 import sys
 import unicodedata
 from dataclasses import dataclass, field
@@ -140,6 +152,55 @@ from typing import Callable, Dict, List, Optional, Tuple
 
 import pymupdf  # PyMuPDF
 from PIL import Image
+
+# ------------------------------------------------------------ 엔진 식별 -----
+ENGINE_VERSION = "P16"                     # 패치 번호. 동작이 바뀌는 커밋마다 올린다
+CAPABILITIES = frozenset({"json", "plan_only"})   # 러너는 이 집합만 보고 새 경로를 쓴다 (완성된 기능만 넣는다)
+JSON_SCHEMA = 1                            # --json 레코드 형식 번호. 필드를 빼거나 뜻을 바꾸면 올린다
+MIRROR_DIR = os.path.expanduser("~/audit_runner/crop_mirror")   # 맥미니 러너 전용 복사본 (여기서 뜨는 앱 = 러너 엔진)
+
+
+def engine_git_state() -> dict:
+    """{"sha": str|None, "dirty": bool, "branch": str|None, "source": "build_info"|"git"|None}.
+    호출될 때만 실행된다 (import 시점 부작용 없음). git 은 이 폴더가 작업 트리 최상위일 때만, 2초 제한."""
+    here = os.path.dirname(os.path.abspath(__file__))
+    st = {"sha": None, "dirty": False, "branch": None, "source": None}
+    try:
+        with open(os.path.join(here, "_build_info.py"), encoding="utf-8") as f:
+            m = re.search(r"""GIT_SHA\s*=\s*["']([0-9a-fA-F]{7,40})(-dirty)?["']""", f.read())
+        if m:
+            st.update(sha=m.group(1)[:7], dirty=bool(m.group(2)), source="build_info")
+            return st
+    except OSError:
+        pass
+
+    def git(*args):
+        r = subprocess.run(["git", "-C", here, *args], capture_output=True, text=True, timeout=2)
+        return r.stdout.strip() if r.returncode == 0 else None
+    try:
+        top = git("rev-parse", "--show-toplevel")
+        if top and os.path.realpath(top) == os.path.realpath(here):
+            sha = git("rev-parse", "--short=7", "HEAD")
+            if sha:
+                st.update(sha=sha, source="git",
+                          dirty=bool(git("status", "--porcelain", "--untracked-files=no")),
+                          branch=git("rev-parse", "--abbrev-ref", "HEAD"))
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return st
+
+
+def engine_version() -> str:
+    """'P16+abc1234[-dirty]' 또는 'P16+unknown'."""
+    st = engine_git_state()
+    return f"{ENGINE_VERSION}+{st['sha'] or 'unknown'}{'-dirty' if st['dirty'] else ''}"
+
+
+def is_dev_checkout() -> bool:
+    """개발 clone 에서 실행 중인가 — git 작업 트리이면서 러너 미러(MIRROR_DIR)가 아닐 때."""
+    here = os.path.realpath(os.path.dirname(os.path.abspath(__file__)))
+    return engine_git_state()["source"] == "git" and here != os.path.realpath(MIRROR_DIR)
+
 
 # ---------------------------------------------------------------- 설정 -----
 SUBJECT_CODES = {"공통": "1공통", "확통": "3확통", "미적": "4미적", "기하": "5기하"}
@@ -1264,6 +1325,74 @@ def write_debug_pdf(path: str, jobs: List[Job], out_path: str):
     doc.close()
 
 
+# ------------------------------------------------------- 결과 레코드 -----
+def job_key(job: Job) -> str:
+    return f"{SUBJECT_CODES[job.subject]}{job.num:02d}"
+
+
+def _side_record(jobs: List[Job], kind: str, plan: bool) -> Optional[dict]:
+    """file 레코드의 problem / solution 부분. plan=True 면 조각 영역(쪽, 좌표 소수 둘째 자리)까지."""
+    js = [j for j in jobs if j.kind == kind]
+    if not js:
+        return None
+    rec = {"n": len(js), "template": None, "keys": [job_key(j) for j in js]}
+    if plan:
+        rec["segments"] = {job_key(j): [[s.page, *[round(v, 2) for v in (s.clip.x0, s.clip.y0, s.clip.x1, s.clip.y1)]]
+                                        for s in j.segments] for j in js}
+    return rec
+
+
+def file_record(path: str, exam: str, input_kind: str, kind: Optional[str], status: str, reason: Optional[str],
+                jobs: Optional[List[Job]] = None, notes: Optional[List[str]] = None,
+                plan: bool = False, split_page: Optional[int] = None) -> dict:
+    """--json 의 file 레코드 (schema 1). 거부·실패 파일도 한 줄 남긴다."""
+    return {"schema": JSON_SCHEMA, "type": "file", "engine": engine_version(), "pymupdf": pymupdf.VersionBind,
+            "file": os.path.basename(path), "exam": exam, "input_kind": input_kind, "kind": kind,
+            "split_page": split_page, "status": status, "reason": reason,
+            "problem": _side_record(jobs or [], "문제", plan), "solution": _side_record(jobs or [], "해설", plan),
+            "notes": list(notes or [])}
+
+
+def set_record(exam: str, files: List[dict]) -> dict:
+    """같은 시험지의 file 레코드들 → set 레코드. exclude_reasons 가 비어 있지 않으면 러너는 그 세트를 뺀다."""
+    reasons: List[str] = []
+    notes: List[str] = []
+    prob = [k for f in files if f["problem"] for k in f["problem"]["keys"]]
+    sol = [k for f in files if f["solution"] for k in f["solution"]["keys"]]
+    for f in files:
+        if f["status"] == "rejected":
+            reasons.append("rejected")
+        elif f["status"] == "failed":
+            reasons.append("zero_items" if f["reason"] == "zero_items" else "failed_file")
+    pair_match: Optional[bool] = None
+    diff = {"only_problem": [], "only_solution": []}
+    if prob and sol:
+        ps, ss = set(prob), set(sol)
+        pair_match = ps == ss
+        diff = {"only_problem": sorted(ps - ss), "only_solution": sorted(ss - ps)}
+        if not pair_match:
+            reasons.append("pair_mismatch")
+    for side, keys in (("problem", prob), ("solution", sol)):
+        dups = sorted({k for k in keys if keys.count(k) > 1})
+        if dups:
+            reasons.append("duplicate_key")
+            notes.append(f"duplicate_key({side}): {dups}")
+    reasons = list(dict.fromkeys(reasons))
+    order = ["rejected", "failed", "partial", "ok"]
+    status = min((f["status"] for f in files), key=order.index) if files else "failed"
+    if status == "ok" and reasons:
+        status = "partial"
+    return {"schema": JSON_SCHEMA, "type": "set", "engine": engine_version(), "exam": exam,
+            "files": [f["file"] for f in files], "status": status, "pair_match": pair_match, "diff": diff,
+            "exclude_reasons": reasons, "notes": notes}
+
+
+def exit_code(records: List[dict]) -> int:
+    """0 = failed·rejected 없음 / 1 = failed 있음 / 3 = failed 없고 rejected 있음."""
+    st = {r["status"] for r in records if r["type"] == "file"}
+    return 1 if "failed" in st else (3 if "rejected" in st else 0)
+
+
 # --------------------------------------------------------------- CLI -----
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -1277,43 +1406,74 @@ def main(argv=None):
     ap.add_argument("--pdf", action="store_true", help="PNG 와 함께 문항별 벡터 PDF 도 저장")
     ap.add_argument("--pdf-only", action="store_true", help="PNG 없이 문항별 벡터 PDF 만 저장")
     ap.add_argument("--debug", action="store_true", help="영역 표시 PDF를 함께 저장")
+    ap.add_argument("--json", metavar="경로", default=None,
+                    help="[패치 16] 파일·세트 결과를 JSON Lines 로 기록 (--plan-only 에서 생략하면 표준 출력)")
+    ap.add_argument("--plan-only", action="store_true",
+                    help="[패치 16] 자르지 않고 계획(문항 키·조각 영역)만 레코드로 낸다")
+    ap.add_argument("--version", action="store_true", help="엔진 버전만 출력")
     args = ap.parse_args(argv)
+    if args.version:
+        print(engine_version())
+        return
     want_pdf = args.pdf or args.pdf_only
     want_png = not args.pdf_only
-
-    # [패치 14] 합본이 하나라도 있으면 아무것도 자르기 전에 멈춘다
-    combined = [p for p in args.pdfs if args.kind == "auto" and classify_filename(p)[1] == "합본"]
-    if combined:
-        for p in combined:
-            print(f"[{os.path.basename(p)}] 중단: {COMBINED_MSG}", file=sys.stderr)
-        sys.exit(2)
+    quiet = args.plan_only and not args.json          # 계획을 표준 출력으로 낼 때는 사람용 줄을 숨긴다
+    say = (lambda *a, **k: None) if quiet else print
+    say(f"CroP 엔진 {engine_version()} (pymupdf {pymupdf.VersionBind})")
 
     total = 0
+    records: List[dict] = []
+    by_exam: Dict[str, List[dict]] = {}
     for path in args.pdfs:
-        exam, kind = classify_filename(path)
+        exam, input_kind = classify_filename(path)
         exam = args.exam or exam
-        if args.kind != "auto":
-            kind = args.kind
+        kind = input_kind if args.kind == "auto" else args.kind
+        if kind not in ("문제", "해설"):
+            # [패치 14→16] 합본은 자르지 않는다. 멈추지 않고 rejected 레코드로 남긴 뒤 다음 파일로 간다.
+            say(f"[{os.path.basename(path)}] 거부: {COMBINED_MSG}")
+            rec = file_record(path, exam, input_kind, None, "rejected", "combined_not_supported",
+                              notes=[COMBINED_MSG])
+            records.append(rec); by_exam.setdefault(exam, []).append(rec)
+            continue
         an, jobs = build_jobs(path, exam, kind, args.margin * MM, args.split)
-        print(f"[{os.path.basename(path)}] 시험지명={exam} 종류={kind} "
-              f"문제페이지={len(an.problem_pages)} 해설페이지={len(an.solution_pages)} 문항={len(jobs)}")
+        say(f"[{os.path.basename(path)}] 시험지명={exam} 종류={kind} "
+            f"문제페이지={len(an.problem_pages)} 해설페이지={len(an.solution_pages)} 문항={len(jobs)}")
         for note in an.notes:
-            print(f"  * {note}")
+            say(f"  * {note}")
         for subj, miss in expected_numbers(jobs).items():
-            print(f"  ! {subj} 누락 번호: {miss}")
+            say(f"  ! {subj} 누락 번호: {miss}")
+        status, reason = ("failed", "zero_items") if not jobs else ("ok", None)
+        rec = file_record(path, exam, input_kind, kind, status, reason, jobs, an.notes, plan=args.plan_only)
+        records.append(rec); by_exam.setdefault(exam, []).append(rec)
+        if args.plan_only:
+            continue
 
         def prog(i, n, name):
             if name:
-                print(f"  {i + 1:>3}/{n}  {name}")
+                say(f"  {i + 1:>3}/{n}  {name}")
 
         written = run_jobs(path, jobs, args.dpi, args.out, prog, png=want_png, pdf=want_pdf)
         total += len(written)
         if args.debug:
             dp = os.path.join(args.out, f"{exam}_{kind}_debug.pdf")
             write_debug_pdf(path, jobs, dp)
-            print(f"  [debug] {dp}")
-    fmt = "PNG+PDF" if (want_png and want_pdf) else ("PDF" if want_pdf else "PNG")
-    print(f"완료: {total}개 {fmt} → {args.out}")
+            say(f"  [debug] {dp}")
+    for exam, files in by_exam.items():
+        records.append(set_record(exam, files))
+    if args.json or args.plan_only:
+        lines = "\n".join(json.dumps(r, ensure_ascii=False) for r in records) + "\n"
+        if args.json:
+            os.makedirs(os.path.dirname(os.path.abspath(args.json)), exist_ok=True)
+            with open(args.json, "w", encoding="utf-8") as f:
+                f.write(lines)
+        else:
+            sys.stdout.write(lines)
+    if not args.plan_only:
+        fmt = "PNG+PDF" if (want_png and want_pdf) else ("PDF" if want_pdf else "PNG")
+        say(f"완료: {total}개 {fmt} → {args.out}")
+    code = exit_code(records)
+    if code:
+        sys.exit(code)
 
 
 if __name__ == "__main__":
